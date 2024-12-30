@@ -1,13 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import BertTokenizer, BertModel, Wav2Vec2Processor, Wav2Vec2Model
+import librosa
 
 class MultimodalClassifier(nn.Module):
     def __init__(self,
                  audio_model_name="facebook/wav2vec2-base",
                  text_model_name="bert-base-uncased",
-                 audio_fine_tune=True,
-                 text_fine_tune=True,
+                 audio_fine_tune=False,
+                 text_fine_tune=False,
                  hidden_dim=768,
                  num_classes=4):
         """
@@ -26,7 +28,7 @@ class MultimodalClassifier(nn.Module):
 
         # If Wav2Vec2 base has 768 dims and BERT base has 768 dims -> total is 1536
         # If you use average pooling / CLS, that might remain 768 for each
-        self.fusion_dim = 768 + 768
+        self.fusion_dim = hidden_dim * 2
 
         # A simple linear head for classification
         self.classifier = nn.Linear(self.fusion_dim, num_classes)
@@ -57,12 +59,6 @@ class MultimodalClassifier(nn.Module):
         logits = self.classifier(fused)  # shape [B, num_classes]
 
         return logits
-
-
-import torch
-import torch.nn as nn
-from transformers import Wav2Vec2Processor, Wav2Vec2Model
-import librosa
 
 class AudioEncoder(nn.Module):
     """
@@ -117,10 +113,6 @@ class AudioEncoder(nn.Module):
         audio_emb = hidden_states.mean(dim=1)      # shape [B, D]
 
         return audio_emb
-
-
-from transformers import BertTokenizer, BertModel
-
 class TextEncoder(nn.Module):
     """
     Encodes text using a pretrained BERT model from Hugging Face.

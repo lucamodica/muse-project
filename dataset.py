@@ -1,22 +1,10 @@
-from scipy.io.wavfile import write
 from moviepy.editor import VideoFileClip
 import os
 from torch.utils.data import Dataset
-import torchaudio
 import os
 import pandas as pd
 import numpy as np
-# import ffmpeg
-
-torchaudio.set_audio_backend("sox_io")  # Modern and recommended backend
-
-# def extract_audio(input_video_path, output_audio_path):
-#     (
-#         ffmpeg
-#         .input(input_video_path)
-#         .output(output_audio_path, **{'q:a': 0})
-#         .run()
-#     )
+import librosa
 
 def extract_audio(input_video_path, output_audio_path):
     # Ensure that the output directory exists
@@ -53,11 +41,11 @@ class MELDDataset(Dataset):
         df = pd.read_csv(csv_file)
         for _, row in df.iterrows():
           file_name = f'dia{row["Dialogue_ID"]}_utt{row["Utterance_ID"]}'
-          video_path = f'{root_dir}/{split_type}_splits/{file_name}.mp4'
-          audio_path = f'{root_dir}/train_splits/audio/{file_name}.wav'
+          video_path = f'{root_dir}/meld_{split_type}/video/{file_name}.mp4'
+          audio_path = f'{root_dir}/meld_{split_type}/audio/{file_name}.wav'
           
-          # if not os.path.exists(audio_path):
-          #   extract_audio(video_path, audio_path)
+          if not os.path.exists(audio_path):
+            extract_audio(video_path, audio_path)
           
           self.samples.append((
             audio_path,
@@ -65,6 +53,12 @@ class MELDDataset(Dataset):
             row["Emotion"],
             row['Sentiment']
           ))
+          
+    def get_emotions_list(self):
+        return [sample[2] for sample in self.samples]
+    
+    def get_sentiments_list(self):
+        return [sample[3] for sample in self.samples]
 
     def __len__(self):
         return len(self.samples)
@@ -72,9 +66,16 @@ class MELDDataset(Dataset):
     def __getitem__(self, idx):
         audio_path, transcript, emotion, sentiment = self.samples[idx]
 
-        waveform, sample_rate = torchaudio.load(audio_path)
+        # waveform, sample_rate = torchaudio.load(audio_path)
+        audio_array, sample_rate = librosa.load(audio_path)
         if self.transform:
-            waveform = self.transform(waveform)
+            audio_array = self.transform(audio_array)
 
         # Return raw waveform, transcript string, and label
-        return waveform, sample_rate, transcript, emotion, sentiment
+        return {
+            'audio_array': audio_array,
+            'sampling_rate': sample_rate,
+            'transcript': transcript,
+            'emotion': emotion,
+            'sentiment': sentiment
+        }
