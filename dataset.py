@@ -30,7 +30,7 @@ class MELDDataset(Dataset):
       - label: The emotion label (int)
     """
 
-    def __init__(self, csv_file, root_dir='./data', split_type='train', transform=None):
+    def __init__(self, csv_file, root_dir='./data', transform=None):
         """
         :param csv_file: Path to a CSV file (or txt) listing [audio_path, transcript, label].
         :param transform: Optional audio transform (torchaudio transforms or custom).
@@ -41,8 +41,8 @@ class MELDDataset(Dataset):
         df = pd.read_csv(csv_file)
         for _, row in df.iterrows():
           file_name = f'dia{row["Dialogue_ID"]}_utt{row["Utterance_ID"]}'
-          video_path = f'{root_dir}/meld_{split_type}/video/{file_name}.mp4'
-          audio_path = f'{root_dir}/meld_{split_type}/audio/{file_name}.wav'
+          video_path = f'{root_dir}/video/{file_name}.mp4'
+          audio_path = f'{root_dir}/audio/{file_name}.wav'
           
           if not os.path.exists(audio_path):
             extract_audio(video_path, audio_path)
