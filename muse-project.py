@@ -1,24 +1,13 @@
-#!/usr/bin/env python
-# coding: utf-8
 
-# # MUSE
-
-# ## Imports
-
-# In[2]:
-
+from .backbone import resnet18
 
 import tarfile
 import os
-from moviepy.editor import VideoFileClip
-import os
 from torch.utils.data import Dataset
-import os
 import pandas as pd
 import numpy as np
 import librosa
 import matplotlib.pyplot as plt
-from IPython.display import Audio
 import random
 import torch
 import torch.nn as nn
@@ -26,80 +15,63 @@ import torch.nn.functional as F
 from transformers import BertTokenizer, BertModel, Wav2Vec2Processor, Wav2Vec2Model
 from sklearn.metrics import classification_report, accuracy_score, f1_score
 import joblib
+from pprint import pprint
+import torch
+from torch.utils.data import DataLoader
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Subset
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+from sklearn.preprocessing import label_binarize
+from tqdm import tqdm
+import warnings
 
-device = 'cuda'
 
 
 # ## Data
 
-# In[3]:
-
-
-def extract_audio(input_video_path, output_audio_path):
-    # Ensure that the output directory exists
-    output_dir = os.path.dirname(output_audio_path)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Load the video file
-    video = VideoFileClip(input_video_path)
-
-    # Write audio directly to a file
-    video.audio.write_audiofile(
-        output_audio_path, fps=44100, verbose=False, logger=None)
-
-    # Close the video clip
-    video.close()
-
 class MELDDataset(Dataset):
-    """
-    A simple Dataset for IEMOCAP-like data, where each entry has:
-      - audio_path: Path to the .wav file
-      - transcript: The text transcript
-      - label: The emotion label (int)
-    """
-
-    def __init__(self, csv_file, root_dir='./data', transform=None, target_sr=16):
-        """
-        :param csv_file: Path to a CSV file (or txt) listing [audio_path, transcript, label].
-        :param transform: Optional audio transform (torchaudio transforms or custom).
-        """
+    def __init__(self, csv_file, root_dir='./data', mode="train", transform=None, target_sr=16000):
         self.samples = []
         self.transform = transform
+        self.target_sr = target_sr
 
         df = pd.read_csv(f'{root_dir}/{csv_file}')
         for _, row in df.iterrows():
-          file_name = f'dia{row["Dialogue_ID"]}_utt{row["Utterance_ID"]}'
-          video_path = f'{root_dir}/video/{file_name}.mp4'
-          audio_path = f'{root_dir}/audio/{file_name}.wav'
-          
-          if not os.path.exists(audio_path) and os.path.exists(video_path):
-            extract_audio(video_path, audio_path)
-          
-          self.samples.append((
-            audio_path,
-            row["Utterance"], 
-            row["Emotion"],
-            row['Sentiment']
-          ))
-          
+            file_name = f'dia{row["Dialogue_ID"]}_utt{row["Utterance_ID"]}'
+            video_path = f'{root_dir}/video/{file_name}.mp4'
+            audio_path = f'{root_dir}/audio/{file_name}.wav'
+            npy_path   = f'npy_data/{mode}/{file_name}.npy'
+
+            # Precompute & save .npy if doesn't exist
+            if not os.path.exists(npy_path):
+                audio_array, sr = librosa.load(audio_path, sr=None)
+                if sr != self.target_sr:
+                    # Use named arguments for librosa.resample in case of librosa 0.10+
+                    audio_array = librosa.resample(
+                        y=audio_array,
+                        orig_sr=sr,
+                        target_sr=self.target_sr
+                    )
+                # Create folder if needed
+                os.makedirs(os.path.dirname(npy_path), exist_ok=True)
+                np.save(npy_path, audio_array)
+
+            self.samples.append((
+                npy_path,
+                row["Utterance"], 
+                row["Emotion"],
+                row["Sentiment"]
+            ))
+
     def get_emotions_dicts(self):
-        """
-        Returns two dictionaries:
-        - int_to_str: Maps indices to emotion strings.
-        - str_to_int: Maps emotion strings to indices.
-        """
         labels = list(set([sample[2] for sample in self.samples]))
         int_to_str = {idx: label for idx, label in enumerate(labels)}
         str_to_int = {emotion: idx for idx, emotion in int_to_str.items()}
         return int_to_str, str_to_int
 
     def get_sentiments_dicts(self):
-        """
-        Returns two dictionaries:
-        - int_to_str: Maps indices to sentiment strings.
-        - str_to_int: Maps sentiment strings to indices.
-        """
         labels = list(set([sample[3] for sample in self.samples]))
         int_to_str = {idx: label for idx, label in enumerate(labels)}
         str_to_int = {sentiment: idx for idx, sentiment in int_to_str.items()}
@@ -109,170 +81,25 @@ class MELDDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        audio_path, transcript, emotion, sentiment = self.samples[idx]
-
+        npy_path, transcript, emotion, sentiment = self.samples[idx]
         emotion_to_int = self.get_emotions_dicts()[1]
         sentiment_to_int = self.get_sentiments_dicts()[1]
 
-        audio_array, sr = librosa.load(audio_path)
+        # Load the resampled audio from .npy
+        audio_array = np.load(npy_path)
+
         if self.transform:
             audio_array = self.transform(audio_array)
 
-        return audio_array, sr, transcript, emotion_to_int[emotion], sentiment_to_int[sentiment]
+        audio_tensor = torch.tensor(audio_array, dtype=torch.float)
 
-
-# In[34]:
-
-
-# setup the dataset
-orig_train_set = MELDDataset(
-    csv_file="train_sent_emo.csv",
-    root_dir="/kaggle/input/meld-train-muse"
-)
-
-dev_set = MELDDataset(
-    csv_file="dev_sent_emo.csv",
-    root_dir="/kaggle/input/meld-dev-muse"
-)
-
-test_set = MELDDataset(
-    csv_file='test_sent_emo.csv',
-    root_dir='/kaggle/input/meld-test-muse'
-)
-
-
-# In[5]:
-
-
-def show_class_distribution(dataset):
-    """
-    Displays the class distribution for emotions and sentiments as subplots
-    with the counts displayed on top of the bars.
-
-    :param dataset: An instance of the MELDDataset class.
-    """
-    # Get the mappings for emotion and sentiment
-    int_to_emotion, _ = dataset.get_emotions_dicts()
-    int_to_sentiment, _ = dataset.get_sentiments_dicts()
-
-    # Initialize counters for emotions and sentiments
-    emotion_counts = {emotion: 0 for emotion in int_to_emotion.values()}
-    sentiment_counts = {sentiment: 0 for sentiment in int_to_sentiment.values()}
-
-    # Count occurrences of each class in the dataset
-    for _, _, emotion, sentiment in dataset.samples:
-        emotion_counts[emotion] += 1
-        sentiment_counts[sentiment] += 1
-
-    # Create subplots
-    fig, axes = plt.subplots(1, 2, figsize=(16, 6), sharey=False)
-
-    # Plot Emotion Distribution
-    axes[0].bar(emotion_counts.keys(), emotion_counts.values(), color='skyblue', alpha=0.8)
-    axes[0].set_title("Emotion Class Distribution", fontsize=16)
-    axes[0].set_xlabel("Emotion", fontsize=14)
-    axes[0].set_ylabel("Count", fontsize=14)
-    axes[0].tick_params(axis='x', rotation=45, labelsize=12)
-    axes[0].grid(axis='y', linestyle='--', alpha=0.6)
-
-    # Add counts on top of bars for emotions
-    for i, value in enumerate(emotion_counts.values()):
-        axes[0].text(i, value + 10, str(value), ha='center', fontsize=12, color='black')
-
-    # Plot Sentiment Distribution
-    axes[1].bar(sentiment_counts.keys(), sentiment_counts.values(), color='salmon', alpha=0.8)
-    axes[1].set_title("Sentiment Class Distribution", fontsize=16)
-    axes[1].set_xlabel("Sentiment", fontsize=14)
-    axes[1].tick_params(axis='x', rotation=45, labelsize=12)
-    axes[1].grid(axis='y', linestyle='--', alpha=0.6)
-
-    # Add counts on top of bars for sentiments
-    for i, value in enumerate(sentiment_counts.values()):
-        axes[1].text(i, value + 10, str(value), ha='center', fontsize=12, color='black')
-
-    # Adjust layout
-    plt.tight_layout()
-    plt.show()
-
-show_class_distribution(orig_train_set)
-
-
-# In[6]:
-
-
-audio_array, sr, transcript, emotion, sentiment = orig_train_set[1]
-
-Audio(audio_array, rate=sr)
-
-
-# In[7]:
-
-
-def remove_random_neutral_samples(dataset, num_to_remove=2000, random_seed=42):
-    """
-    Removes `num_to_remove` random samples with the emotion label "neutral" from the dataset.
-    Ensures reproducibility by setting a random seed.
-
-    :param dataset: An instance of the MELDDataset class.
-    :param num_to_remove: Number of "neutral" samples to remove (default is 2000).
-    :param random_seed: Seed for random number generation (default is 42).
-    """
-    ds = dataset
-    
-    # Filter indices of samples with the "neutral" label
-    neutral_indices = [i for i, sample in enumerate(ds.samples) if sample[2] == "neutral"]
-
-    # Ensure the number to remove does not exceed the available "neutral" samples
-    if len(neutral_indices) < num_to_remove:
-        print(f"Only {len(neutral_indices)} 'neutral' samples available. Removing all of them.")
-        num_to_remove = len(neutral_indices)
-
-    # Set random seed for reproducibility
-    random.seed(random_seed)
-
-    # Randomly select `num_to_remove` indices from the neutral samples
-    indices_to_remove = random.sample(neutral_indices, num_to_remove)
-
-    # Remove the selected samples from the dataset
-    ds.samples = [sample for i, sample in enumerate(ds.samples) if i not in indices_to_remove]
-
-    return ds
-
-# train_set = MELDDataset(
-#     csv_file="train_sent_emo.csv",
-#     root_dir="/kaggle/input/meld-train-muse"
-# )
-# train_set = remove_random_neutral_samples(train_set) 
-train_set = orig_train_set
-
-
-# In[8]:
-
-
-print(f'Number of sentiments: {len(train_set.get_emotions_dicts()[0].values())}')
-print(f'Number of emotions: {len(train_set.get_sentiments_dicts()[0].values())}')
-
-
-# In[9]:
-
-
-def get_subset(dataset, subset_size=100):
-    # Randomly select indices for the subset
-    subset_indices = torch.randperm(len(dataset))[:subset_size]
-    
-    # Create the subset
-    train_subset = Subset(train_set, subset_indices)
-
-    return train_subset
-
-
-# In[35]:
-
-
-import torch
-from torch.utils.data import DataLoader
-from torch.nn.utils.rnn import pad_sequence
-from torch.utils.data import Subset
+        return (
+            audio_tensor,         # [T]
+            self.target_sr,       # already at target_sr
+            transcript,
+            emotion_to_int[emotion],
+            sentiment_to_int[sentiment]
+        )
 
 def collate_fn(batch):
     """
@@ -282,7 +109,7 @@ def collate_fn(batch):
     audio_arrays, sample_rates, texts, emotions, sentiments = zip(*batch)
 
     # Pad audio waveforms to the maximum length in the batch
-    audio_arrays = [torch.tensor(audio) for audio in audio_arrays]
+    audio_arrays = [audio.clone().detach() for audio in audio_arrays]
     audio_arrays_padded = pad_sequence(audio_arrays, batch_first=True, padding_value=0)
 
     # Convert labels to tensors
@@ -291,107 +118,56 @@ def collate_fn(batch):
 
     return audio_arrays_padded, sample_rates, texts, emotions, sentiments
 
-train_loader = DataLoader(
-    train_set,
-    batch_size=16,         # You can adjust the batch size
-    shuffle=True,          # Shuffle data during training
-    num_workers=4,         # Number of workers for parallel data loading
-    collate_fn=collate_fn
-)
-
-subtrain_loader = DataLoader(
-    get_subset(train_set),
-    batch_size=16,         # You can adjust the batch size
-    shuffle=True,          # Shuffle data during training
-    num_workers=4,         # Number of workers for parallel data loading
-    collate_fn=collate_fn
-)
-
-dev_loader = DataLoader(
-    dev_set,
-    batch_size=16,         # You can adjust the batch size
-    shuffle=True,          # Shuffle data during training
-    num_workers=4,         # Number of workers for parallel data loading
-    collate_fn=collate_fn
-)
-
-test_loader = DataLoader(
-    test_set,
-    batch_size=16,         # You can adjust the batch size
-    shuffle=True,          # Shuffle data during training
-    num_workers=4,         # Number of workers for parallel data loading
-    collate_fn=collate_fn
-)
-
-
-# ## Embeddings
-
-# In[11]:
-
-
 class AudioEncoder(nn.Module):
-    """
-    Uses a Wav2Vec2 model to encode raw waveform into an audio embedding.
-    """
-
-    def __init__(self, model_name="facebook/wav2vec2-base", target_sr=16000, fine_tune=False, device='cuda'):
-        """
-        :param model_name: Hugging Face model name, e.g., "facebook/wav2vec2-base".
-        :param target_sr: Sample rate the model expects, typically 16k.
-        :param fine_tune: Whether we allow gradient updates in the model.
-        """
+    def __init__(self, model_name="facebook/wav2vec2-base", 
+                 target_sr=16000, 
+                 fine_tune=False, 
+                 unfreeze_last_n=2,  # Number of last layers to unfreeze
+                 device='cuda'):
         super(AudioEncoder, self).__init__()
         self.processor = Wav2Vec2Processor.from_pretrained(model_name)
         self.model = Wav2Vec2Model.from_pretrained(model_name).to(device)
         self.target_sr = target_sr
 
-        if not fine_tune:
-            # Freeze parameters
-            for param in self.model.parameters():
-                param.requires_grad = False
+        # Freeze entire model
+        for param in self.model.parameters():
+            param.requires_grad = False
 
-    def forward(self, waveforms, sample_rates):
+        if fine_tune:
+            # Unfreeze only the last `unfreeze_last_n` encoder layers
+            total_layers = len(self.model.encoder.layers)
+            for layer_idx in range(total_layers - unfreeze_last_n, total_layers):
+                for param in self.model.encoder.layers[layer_idx].parameters():
+                    param.requires_grad = True
+
+    def forward(self, waveforms):
         """
-        :param waveforms: Tensor of shape [B, T] (batched waveforms)
-        :param sample_rates: List of sample rates for each audio in the batch
+        :param waveforms: Tensor of shape [B, T] (already at self.target_sr)
         :return: A tensor of shape [B, hidden_dim] (audio embeddings for the batch)
         """
-        batch_size = waveforms.size(0)
-        processed_waveforms = []
-        device = self.model.device
-
-        # Resample each waveform in the batch
-        for i in range(batch_size):
-            waveform = waveforms[i]
-            sample_rate = sample_rates[i]
-            if sample_rate != self.target_sr:
-                # Convert waveform to numpy, resample, then back to tensor
-                waveform_np = waveform.cpu().numpy()
-                waveform_np = librosa.resample(waveform_np, orig_sr=sample_rate, target_sr=self.target_sr)
-                waveform = torch.tensor(waveform_np)
-            processed_waveforms.append(waveform)
-
-        # Stack all processed waveforms into a batch
-        waveforms = torch.stack(processed_waveforms).to(waveforms.device)
+        # Ensure the waveforms are on the correct device
+        waveforms = waveforms.to(self.model.device)
         
-        # Process waveforms
+        # Prepare inputs for Wav2Vec2Processor
         inputs = self.processor(
-            waveforms.cpu(), 
-            sampling_rate=self.target_sr, 
-            return_tensors="pt", 
+            waveforms.cpu(),
+            sampling_rate=self.target_sr,
+            return_tensors="pt",
             padding=True
-        ).input_values.squeeze((0, 1)).to(waveforms.device)
-         
+        ).input_values.squeeze((0, 1)).to(self.model.device)
+    
+        # Forward pass
         with torch.no_grad() if not self.training or not any(
             p.requires_grad for p in self.model.parameters()
         ) else torch.enable_grad():
             outputs = self.model(inputs)
             hidden_states = outputs.last_hidden_state  # shape [B, T, D]
-
-        # Average pooling across time dimension
+    
+        # Average pooling
         audio_emb = hidden_states.mean(dim=1)  # shape [B, D]
-
+    
         return audio_emb
+
         
 class TextEncoder(nn.Module):
     """
@@ -439,124 +215,8 @@ class TextEncoder(nn.Module):
         return cls_emb
 
 
-# In[12]:
-
-
-import torch
-from torch.utils.data import Dataset
-import torch.nn.functional as F
-
-class EmbeddingDataset(Dataset):
-    def __init__(self, audio_embs, text_embs, emotion_labels, sentiment_labels):
-        """
-        :param audio_embs:    FloatTensor [N, audio_dim]
-        :param text_embs:     FloatTensor [N, text_dim]
-        :param emotion_labels: List of length N (ints or strings)
-        :param sentiment_labels: List of length N (ints or strings)
-        """
-        self.audio_embs = audio_embs
-        self.text_embs = text_embs
-        self.emotion_labels = emotion_labels
-        self.sentiment_labels = sentiment_labels
-
-    def __len__(self):
-        return len(self.audio_embs)
-
-    def __getitem__(self, idx):
-        return (
-            self.audio_embs[idx], 
-            self.text_embs[idx], 
-            self.emotion_labels[idx], 
-            self.sentiment_labels[idx]
-        )
-
-def build_embedding_dataset(dataloader, audio_encoder, text_encoder, device='cuda'):
-    """
-    Iterates over a DataLoader that yields (audio_arrays, srs, transcripts, emotion_labels, sentiment_labels)
-    in batches, runs each batch through the frozen encoders, and returns an EmbeddingDataset.
-    """
-    audio_encoder.eval()
-    text_encoder.eval()
-
-    all_audio_embs = []
-    all_text_embs = []
-    all_emotions = []
-    all_sentiments = []
-
-    for audio_arrays, srs, transcripts, emotion_labels, sentiment_labels in dataloader:
-        # audio_arrays: [B, T]
-        # srs: list or 1D tensor of sample rates (length B)
-        # transcripts: list of strings (length B)
-        # emotion_labels, sentiment_labels: typically 1D tensors or lists
-
-        # Move audio arrays to device
-        audio_arrays = torch.tensor(audio_arrays).to(device)
-        
-        # Convert label tensors to Python lists (if needed)
-        # so we can .extend() them below
-        if isinstance(emotion_labels, torch.Tensor):
-            emotion_labels = emotion_labels.tolist()
-        if isinstance(sentiment_labels, torch.Tensor):
-            sentiment_labels = sentiment_labels.tolist()
-
-        with torch.no_grad():
-            # 1) Audio embeddings (shape: [B, audio_dim])
-            audio_emb = audio_encoder(audio_arrays, srs)
-
-            # 2) Text embeddings (shape: [B, text_dim])
-            text_emb = text_encoder(transcripts)
-
-        # Collect embeddings on CPU
-        all_audio_embs.append(audio_emb.cpu())
-        all_text_embs.append(text_emb.cpu())
-
-        # Collect labelsProcessor Usage: The processor is used on the CPU, but the resulting tensors are moved to the model's device before model inference.
-        all_emotions.extend(emotion_labels)
-        all_sentiments.extend(sentiment_labels)
-
-    # Concatenate all batches into single tensors: [N, audio_dim] / [N, text_dim]
-    audio_embs_tensor = torch.cat(all_audio_embs, dim=0)
-    text_embs_tensor  = torch.cat(all_text_embs,  dim=0)
-
-    # Build a new EmbeddingDataset that returns (audio_emb, text_emb, emotion, sentiment)
-    emb_dataset = EmbeddingDataset(
-        audio_embs_tensor, 
-        text_embs_tensor, 
-        all_emotions, 
-        all_sentiments
-    )
-    return emb_dataset
-
-
-# In[13]:
-
-
-audio_model_name = "facebook/wav2vec2-base"
-text_model_name = "bert-base-uncased"
-
-audio_encoder = AudioEncoder(model_name=audio_model_name)
-text_encoder = TextEncoder(model_name=text_model_name)
-
-
-# In[14]:
-
-
-train_emb_dataset = build_embedding_dataset(train_loader, audio_encoder, text_encoder, device)
-dev_emb_dataset   = build_embedding_dataset(dev_loader, audio_encoder, text_encoder, device)
-
-
-# In[41]:
-
-
-test_emb_dataset = build_embedding_dataset(test_loader, audio_encoder, text_encoder, device)
-
-
-# ## Model
-
-# In[16]:
-
-
 from torch.profiler import profile, record_function, ProfilerActivity
+import time
 
 class MultimodalClassifier(nn.Module):
     def __init__(self,
@@ -564,6 +224,8 @@ class MultimodalClassifier(nn.Module):
                  text_model_name="bert-base-uncased",
                  audio_fine_tune=False,
                  text_fine_tune=False,
+                 unfreeze_last_n_audio=2,
+                 unfreeze_last_n_text=2,
                  hidden_dim=768,
                  num_emotions=7,
                  num_sentiments=3):
@@ -580,7 +242,8 @@ class MultimodalClassifier(nn.Module):
         # Build encoders
         self.audio_model_name = audio_model_name
         self.text_model_name = text_model_name
-        self.audio_encoder = AudioEncoder(model_name=audio_model_name, fine_tune=audio_fine_tune)
+        #self.audio_encoder = AudioEncoder(model_name=audio_model_name, fine_tune=audio_fine_tune, unfreeze_last_n=unfreeze_last_n_audio)
+        self.audio_encoder = resnet18(modality='audio')
         self.text_encoder = TextEncoder(model_name=text_model_name, fine_tune=text_fine_tune)
 
         # If Wav2Vec2 base has 768 dims and BERT base has 768 dims -> total is 1536
@@ -590,18 +253,28 @@ class MultimodalClassifier(nn.Module):
         self.emotion_classifier = nn.Linear(self.fusion_dim, num_emotions)
         self.sentiment_classifier = nn.Linear(self.fusion_dim, num_sentiments)
 
-    def forward(self, audio_array, sr, text):
+    def forward(self, audio_array, text):
         """
         :param waveform: Tensor of shape [1, T] or [B, 1, T] with audio waveforms
         :param sample_rate: int or list of ints (for multiple samples)
         :param text: list of strings or a single string
         :return: logits of shape [B, num_classes]
         """
+        #timings = {}
+
+        a = F.adaptive_avg_pool2d(a, 1)
+
+        a = torch.flatten(a, 1)
+        
         # 1) Audio embeddings
-        audio_emb = self.audio_encoder(audio_array, sr)  # shape [1, D]
+        #start = time.time()
+        audio_emb = self.audio_encoder(audio_array)  # shape [1, D]
+        #timings['audio_encoder'] = time.time() - start
 
         # 2) Text embeddings
+        #start = time.time()
         text_emb = self.text_encoder(text)  # shape [B, D]
+        #timings['text_encoder'] = time.time() - start
         # If it's a single item, shape might be [1, D]
 
         # 3) Fuse (concat)
@@ -610,62 +283,13 @@ class MultimodalClassifier(nn.Module):
         # 4) Classification
         #logits = self.classifier(fused)  # shape [B, num_classes]
 
+        #print("Timings:", timings)
+
         return audio_emb, text_emb
 
 
-# In[17]:
-
-
-test_model = MultimodalClassifier(audio_fine_tune=False)
-
-
-# ### Sanity check for the model class
-
-# In[18]:
-
-
-subtrain_loader = DataLoader(
-    get_subset(train_set),
-    batch_size=16,         # You can adjust the batch size
-    shuffle=True,          # Shuffle data during training
-    num_workers=4,         # Number of workers for parallel data loading
-    collate_fn=collate_fn
-)
-
-# check
-audio_arrays, srs, texts, _, _ = next(iter(train_loader))
-
-output = test_model(audio_arrays.to(device), srs, texts)
-output # the output is a tuple with both text and and audio embedding
-
-
-# ## Training
-
-# In[19]:
-
-
 def process_task(model, a, t, classifier, weight_size, labels, criterion, device='cuda'):
-    """
-    Helper function to process a single task (e.g., emotion or sentiment).
-    
-    Parameters
-    ----------
-    model        : your model
-    a            : audio embeddings
-    t            : text embeddings
-    classifier   : the classifier layer (e.g., model.emotion_classifier)
-    weight_size  : dimensionality to split classifier weights (for audio vs. text)
-    labels       : ground-truth labels
-    criterion    : PyTorch loss function (e.g., CrossEntropyLoss)
-    device       : device to run computations on
 
-    Returns
-    -------
-    loss              : computed loss for this task
-    preds_fused       : predicted classes from fused embeddings
-    preds_audio       : predicted classes from audio embeddings
-    preds_text        : predicted classes from text embeddings
-    """
     fused = torch.cat([a, t], dim=-1)
 
     # --- Compute logits ---
@@ -693,11 +317,8 @@ def process_task(model, a, t, classifier, weight_size, labels, criterion, device
 
     return loss, preds_fused, preds_audio, preds_text
 
-
-# In[20]:
-
-
-def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.5, sentiment_reg=0.5, device='cuda'): 
+def train_one_epoch(model, dataloader, optimizer, criterions,
+                    emotion_reg=0.6, sentiment_reg=0.4, device='cuda'):
     model.train()
 
     # tracked measures
@@ -705,29 +326,29 @@ def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.5, s
     metrics = {'emotion': {'fused': [], 'audio': [], 'text': [], 'labels': []},
                'sentiment': {'fused': [], 'audio': [], 'text': [], 'labels': []}}
 
-    # For splitting the classifier weights
-    emotion_weight_size   = model.emotion_classifier.weight.size(1)
-    sentiment_weight_size = model.sentiment_classifier.weight.size(1)
-
-    # for audio_arrays, sr, texts, emotion_labels, sentiment_labels in dataloader:
-    for a, t, emotion_labels, sentiment_labels in dataloader:
+    # Wrap dataloader with tqdm
+    loop = tqdm(dataloader, desc="Training", leave=False)
+    
+    for audio_arrays, sr, texts, emotion_labels, sentiment_labels in loop:
         # Move data to device
-        # audio_arrays = audio_arrays.to(device)
-        a = a.to(device)
-        t = t.to(device)
+        audio_arrays = audio_arrays.to(device)
         emotion_labels = emotion_labels.to(device)
         sentiment_labels = sentiment_labels.to(device)
 
         optimizer.zero_grad()
 
-        # -- Get audio and text embeddings from the model --
-        # a, t = model(audio_arrays, sr, texts)
+        # Forward pass for audio and text
+        a, t = model(audio_arrays, texts)
 
-        # ============================ EMOTION ============================
+        # EMOTION TASK
         emotion_loss, e_fused, e_audio, e_text = process_task(
-                model=model, a=a, t=t, classifier=model.emotion_classifier,
-                weight_size=model.emotion_classifier.weight.size(1),
-                labels=emotion_labels, criterion=criterions['emotion']
+            model=model, 
+            a=a, 
+            t=t, 
+            classifier=model.emotion_classifier,
+            weight_size=model.emotion_classifier.weight.size(1),
+            labels=emotion_labels, 
+            criterion=criterions['emotion']
         )
         losses['emotion'] += emotion_loss.item()
         metrics['emotion']['fused'].extend(e_fused)
@@ -735,11 +356,15 @@ def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.5, s
         metrics['emotion']['text'].extend(e_text)
         metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
 
-        # ============================ SENTIMENT ============================
+        # SENTIMENT TASK
         sentiment_loss, s_fused, s_audio, s_text = process_task(
-                model=model, a=a, t=t, classifier=model.sentiment_classifier,
-                weight_size=model.sentiment_classifier.weight.size(1),
-                labels=sentiment_labels, criterion=criterions['sentiment']
+            model=model, 
+            a=a, 
+            t=t, 
+            classifier=model.sentiment_classifier,
+            weight_size=model.sentiment_classifier.weight.size(1),
+            labels=sentiment_labels, 
+            criterion=criterions['sentiment']
         )
         losses['sentiment'] += sentiment_loss.item()
         metrics['sentiment']['fused'].extend(s_fused)
@@ -747,17 +372,16 @@ def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.5, s
         metrics['sentiment']['text'].extend(s_text)
         metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
 
-        # ============================ UPDATE ============================
-        # Weighted combination of emotion and sentiment losses
+        # Backprop on weighted loss
         combined_loss = emotion_reg * emotion_loss + sentiment_reg * sentiment_loss
         combined_loss.backward()
         optimizer.step()
-
+    
     # Average losses
     losses['emotion'] /= len(dataloader)
     losses['sentiment'] /= len(dataloader)
 
-    # compute metrics per modality and 
+    # compute metrics per modality 
     emotion_metrics = {
         'fused': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['fused']),
         'audio': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['audio']),
@@ -771,37 +395,33 @@ def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.5, s
     
     return losses, {'emotion': emotion_metrics, 'sentiment': sentiment_metrics}
 
+
 def validate_one_epoch(model, dataloader, criterions, device='cuda'):
     model.eval()
 
-    # Initialize tracking variables
     losses = {'emotion': 0.0, 'sentiment': 0.0}
     metrics = {'emotion': {'fused': [], 'audio': [], 'text': [], 'labels': []},
                'sentiment': {'fused': [], 'audio': [], 'text': [], 'labels': []}}
 
-    # Weight sizes
-    emotion_weight_size   = model.emotion_classifier.weight.size(1)
-    sentiment_weight_size = model.sentiment_classifier.weight.size(1)
-
     with torch.no_grad():
-        # for audio_arrays, sr, texts, emotion_labels, sentiment_labels in dataloader:
-        for a, t, emotion_labels, sentiment_labels in dataloader:
-            # Move data to device
-            # audio_arrays = audio_arrays.to(device)
-            a = a.to(device)
-            t = t.to(device)
+        # Also wrap validation dataloader with tqdm
+        loop = tqdm(dataloader, desc="Validation", leave=False)
+        
+        for audio_arrays, sr, texts, emotion_labels, sentiment_labels in loop:
+            audio_arrays = audio_arrays.to(device)
             emotion_labels = emotion_labels.to(device)
             sentiment_labels = sentiment_labels.to(device)
 
-            # Obtain embeddings
-            # a, t = model(audio_arrays, sr, texts)
+            a, t = model(audio_arrays, texts)
 
-            # ------------------- EMOTION TASK -------------------
-            # Process Emotion Task
             emotion_loss, e_fused, e_audio, e_text = process_task(
-                model=model, a=a, t=t, classifier=model.emotion_classifier,
+                model=model, 
+                a=a, 
+                t=t, 
+                classifier=model.emotion_classifier,
                 weight_size=model.emotion_classifier.weight.size(1),
-                labels=emotion_labels, criterion=criterions['emotion']
+                labels=emotion_labels, 
+                criterion=criterions['emotion']
             )
             losses['emotion'] += emotion_loss.item()
             metrics['emotion']['fused'].extend(e_fused)
@@ -809,11 +429,14 @@ def validate_one_epoch(model, dataloader, criterions, device='cuda'):
             metrics['emotion']['text'].extend(e_text)
             metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
 
-            # ------------------ SENTIMENT TASK ------------------
             sentiment_loss, s_fused, s_audio, s_text = process_task(
-                model=model, a=a, t=t, classifier=model.sentiment_classifier,
+                model=model, 
+                a=a, 
+                t=t, 
+                classifier=model.sentiment_classifier,
                 weight_size=model.sentiment_classifier.weight.size(1),
-                labels=sentiment_labels, criterion=criterions['sentiment']
+                labels=sentiment_labels, 
+                criterion=criterions['sentiment']
             )
             losses['sentiment'] += sentiment_loss.item()
             metrics['sentiment']['fused'].extend(s_fused)
@@ -821,11 +444,9 @@ def validate_one_epoch(model, dataloader, criterions, device='cuda'):
             metrics['sentiment']['text'].extend(s_text)
             metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
             
-        # Average losses
         losses['emotion'] /= len(dataloader)
         losses['sentiment'] /= len(dataloader)
     
-        # Compute metrics
         emotion_metrics = {
             'fused': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['fused']),
             'audio': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['audio']),
@@ -838,7 +459,6 @@ def validate_one_epoch(model, dataloader, criterions, device='cuda'):
         }
 
     return losses, {'emotion': emotion_metrics, 'sentiment': sentiment_metrics}
-
 
 def compute_metrics(true_labels, predictions):
     """
@@ -919,20 +539,19 @@ def train_and_validate(model, train_loader, val_loader, optimizer, criterions, n
         train_losses, train_metrics = train_one_epoch(model, train_loader, optimizer, criterions, device=device)
         val_losses, val_metrics = validate_one_epoch(model, val_loader, criterions, device=device)
 
-        if epoch % 20 == 0 or epoch == num_epochs:
-            print(f"Epoch [{epoch+1}/{num_epochs}]")
-            for task in ['emotion', 'sentiment']:
-                print(f"\t{task.capitalize()} Train Loss: {train_losses[task]:.4f}")
-                print(f"\t{task.capitalize()} Val Loss:   {val_losses[task]:.4f}")
-                for modality in ['fused', 'audio', 'text']:
-                    train_acc = train_metrics[task][modality]['acc'] * 100
-                    val_acc = val_metrics[task][modality]['acc'] * 100
-                    train_f1 = train_metrics[task][modality]['macro_f1'] * 100
-                    val_f1 = val_metrics[task][modality]['macro_f1'] * 100
-                    print(f"\t\t{modality.capitalize()} Train Acc: {train_acc:.2f}%, Train F1 (macro): {train_f1:.2f}%")
-                    print(f"\t\t{modality.capitalize()} Val Acc:   {val_acc:.2f}%, Val F1 (macro):   {val_f1:.2f}%")
-                    print('\n')
-            print("---------------------------------------------------------------\n")
+        print(f"Epoch [{epoch+1}/{num_epochs}]")
+        for task in ['emotion', 'sentiment']:
+            print(f"\t{task.capitalize()} Train Loss: {train_losses[task]:.4f}")
+            print(f"\t{task.capitalize()} Val Loss:   {val_losses[task]:.4f}")
+            for modality in ['fused', 'audio', 'text']:
+                train_acc = train_metrics[task][modality]['acc'] * 100
+                val_acc = val_metrics[task][modality]['acc'] * 100
+                train_f1 = train_metrics[task][modality]['macro_f1'] * 100
+                val_f1 = val_metrics[task][modality]['macro_f1'] * 100
+                print(f"\t\t{modality.capitalize()} Train Acc: {train_acc:.2f}%, Train F1 (macro): {train_f1:.2f}%")
+                print(f"\t\t{modality.capitalize()} Val Acc:   {val_acc:.2f}%, Val F1 (macro):   {val_f1:.2f}%")
+                print('\n')
+        print("---------------------------------------------------------------\n")
 
         # Save results for both tasks
         results['results_emotions'].append({
@@ -955,129 +574,18 @@ def train_and_validate(model, train_loader, val_loader, optimizer, criterions, n
     results['optimizer'] = optimizer
 
     # save all the results as pkl file
-    results_joblib_path = os.path.join(save_dir, f"{experiment_name}_bsize{train_loader.batch_size}.pkl")
+    results_joblib_path = os.path.join(save_dir, f"{experiment_name}_results.pkl")
     joblib.dump(results, results_joblib_path)
 
     # display the summary of the training as a Datframe (a table per task)
-    print('\n\n SUMMARY OF THE RESULTS\n')
-    for task in ['emotions', 'sentiments']:
-        print(f'Results for the {task} task:')
-        display(task_result_to_table(results[f'results_{task}']))
-    print(f"Results saved as Joblib file: {results_joblib_path}.")
+    # print('\n\n SUMMARY OF THE RESULTS\n')
+    # for task in ['emotions', 'sentiments']:
+    #     print(f'Results for the {task} task:')
+    #     display(task_result_to_table(results[f'results_{task}_bsize{train_dataloader.batch_size}']))
+    # print(f"Results saved as Joblib file: {results_joblib_path}.")
     
     # Display final results in a table
     return model, results
-
-
-# In[21]:
-
-
-# Gather all emotion labels in the train set
-emotion_labels = [sample[2] for sample in train_set.samples]
-
-# Count how many samples of each class (returns unique labels and their counts)
-unique_classes, counts = np.unique(emotion_labels, return_counts=True)
-print("Class labels:", unique_classes)
-print("Class counts:", counts)
-
-# Example output might look like:
-# Class labels: ['joy' 'neutral' 'sadness' 'anger' ...]
-# Class counts: [ 120,  300,  180,  100, ...]
-
-# Convert class strings to the same indices you use for training
-# (If you used get_emotions_dicts, you can do str_to_int)
-_, str_to_int = train_set.get_emotions_dicts()
-
-# Re-order counts so they align with the same integer index you use in your model
-# e.g. label 0 = 'neutral', label 1 = 'joy', etc.
-num_classes = len(str_to_int)
-ordered_counts = [0] * num_classes
-
-for class_label, count in zip(unique_classes, counts):
-    class_idx = str_to_int[class_label]   # Convert 'neutral' → 0, 'joy' → 1, etc.
-    ordered_counts[class_idx] = count
-
-ordered_counts = np.array(ordered_counts)
-print("Ordered counts:", ordered_counts)
-
-# Avoid division by zero
-inverse_freq = 1.0 / np.maximum(ordered_counts, 1)
-
-#joy, fear, disgust, surprise, sadness, neutral, anger
-
-
-# In[22]:
-
-
-emotions_class_weights = torch.tensor(inverse_freq, dtype=torch.float32)
-# or normalize them
-emotions_class_weights = emotions_class_weights / emotions_class_weights.sum() #* num_classes
-
-print("Class weights:", emotions_class_weights)
-emotions_class_weights = emotions_class_weights.to(device)
-
-
-# In[23]:
-
-
-lr = 0.0001
-criterions = {
-    'emotion': nn.CrossEntropyLoss(weight=emotions_class_weights),
-    'sentiment': nn.CrossEntropyLoss()
-}
-num_epochs = 50
-num_emotions = len(train_set.get_emotions_dicts()[0].values())
-num_sentiments = len(train_set.get_sentiments_dicts()[0].values())
-model = MultimodalClassifier(
-    text_fine_tune=False,
-    audio_fine_tune=False, 
-    num_emotions=num_emotions,
-    num_sentiments=num_sentiments
-).to(device)
-optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
-
-experiment_name = f'wav2vec2_bert_init'
-batch_size = 16
-
-train_emb_loader = DataLoader(
-    train_emb_dataset,
-    batch_size=batch_size, 
-    shuffle=True,          
-    num_workers=4,         
-)
-
-dev_emb_loader = DataLoader(
-    dev_emb_dataset,
-    batch_size=batch_size, 
-    shuffle=True,          
-    num_workers=4,         
-)
-
-model, results = train_and_validate(
-    model, train_emb_loader, dev_emb_loader, 
-    optimizer, criterions, num_epochs, 
-    experiment_name=experiment_name, 
-    device='cuda', save_dir='/kaggle/working/'
-)
-print("Training complete.")
-
-
-# ### sanity check for the saved results
-
-# ## Evaluate
-
-# In[25]:
-
-
-from pprint import pprint
-
-# Load the Joblib file
-loaded_results = joblib.load('/kaggle/working/wav2vec2_bert_init_bsize16.pkl')
-
-
-# In[36]:
-
 
 def plot_metrics(results, task='emotions', metric='acc', modality='fused'):
     """
@@ -1107,16 +615,6 @@ def plot_metrics(results, task='emotions', metric='acc', modality='fused'):
     plt.legend()
     plt.grid(True)
     plt.show()
-
-
-# In[37]:
-
-
-plot_metrics(loaded_results, metric='macro_f1', modality='fused', task='emotions')
-
-
-# In[55]:
-
 
 def test_and_save_labels(model, test_loader, dataset, criterions, save_path, device='cuda'):
     """
@@ -1166,31 +664,6 @@ def test_and_save_labels(model, test_loader, dataset, criterions, save_path, dev
 
     return true_and_pred_labels
 
-
-# In[56]:
-
-
-criterions = {
-    'emotion': nn.CrossEntropyLoss(weight=emotions_class_weights),
-    'sentiment': nn.CrossEntropyLoss()
-}
-test_emb_loader = DataLoader(
-    test_emb_dataset,
-    batch_size=batch_size, 
-    shuffle=True,          
-    num_workers=4,         
-)
-true_and_pred_labels = test_and_save_labels(model, test_emb_loader, test_set, criterions, save_path='/kaggle/working')
-
-
-# In[74]:
-
-
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
-from sklearn.preprocessing import label_binarize
-
 def analyze_results_per_class(true_labels, predicted_labels, class_names, task_name="Sentiment", mode="confusion_matrix"):
     """
     Analyze results per class with confusion matrix, classification report, or ROC curves.
@@ -1236,16 +709,142 @@ def analyze_results_per_class(true_labels, predicted_labels, class_names, task_n
         plt.legend(loc="lower right")
         plt.show()
 
+def main():
 
-# In[80]:
+    #warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+    #warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
+    device = 'cuda'
 
-for mode in ['confusion_matrix', 'classification_report', 'roc_curve']:
-    analyze_results_per_class(
-        true_and_pred_labels['emotion']['true'], 
-        true_and_pred_labels['emotion']['pred'], 
-        unique_classes,
-        task_name="Emotions",
-        mode=mode
+    print("Loading data...")
+
+    # setup the dataset
+    train_set = MELDDataset(
+        csv_file="train_sent_emo.csv",
+        root_dir="./meld-train-muse",
+        mode="train"
     )
+
+    dev_set = MELDDataset(
+        csv_file="dev_sent_emo.csv",
+        root_dir="./meld-dev-muse",
+        mode="dev"
+    )
+
+    test_set = MELDDataset(
+        csv_file='test_sent_emo.csv',
+        root_dir='./meld-test-muse',
+        mode='test'
+    )
+    
+    print("Data loaded.")
+
+    train_loader = DataLoader(
+    train_set,
+    batch_size=16,         # You can adjust the batch size
+    shuffle=True,          # Shuffle data during training
+    num_workers=16,         # Number of workers for parallel data loading
+    collate_fn=collate_fn
+    )
+
+    dev_loader = DataLoader(
+        dev_set,
+        batch_size=16,         # You can adjust the batch size
+        shuffle=True,          # Shuffle data during training
+        num_workers=16,         # Number of workers for parallel data loading
+        collate_fn=collate_fn
+    )
+
+    test_loader = DataLoader(
+        test_set,
+        batch_size=16,         # You can adjust the batch size
+        shuffle=True,          # Shuffle data during training
+        num_workers=16,         # Number of workers for parallel data loading
+        collate_fn=collate_fn
+    )
+
+    print("Data loaders created.")
+
+    audio_model_name = "facebook/wav2vec2-base"
+    text_model_name = "bert-base-uncased"
+
+    # Gather all emotion labels in the train set
+    emotion_labels = [sample[2] for sample in train_set.samples]
+
+    # Count how many samples of each class (returns unique labels and their counts)
+    unique_classes, counts = np.unique(emotion_labels, return_counts=True)
+    print("Class labels:", unique_classes)
+    print("Class counts:", counts)
+
+    _, str_to_int = train_set.get_emotions_dicts()
+
+    num_classes = len(str_to_int)
+    ordered_counts = [0] * num_classes
+
+    for class_label, count in zip(unique_classes, counts):
+        class_idx = str_to_int[class_label]   # Convert 'neutral' → 0, 'joy' → 1, etc.
+        ordered_counts[class_idx] = count
+
+    ordered_counts = np.array(ordered_counts)
+    print("Ordered counts:", ordered_counts)
+
+    # Avoid division by zero
+    inverse_freq = 1.0 / np.maximum(ordered_counts, 1)
+
+    emotions_class_weights = torch.tensor(inverse_freq, dtype=torch.float32)
+    # or normalize them
+    emotions_class_weights = emotions_class_weights / emotions_class_weights.sum() #* num_classes
+
+    print("Class weights:", emotions_class_weights)
+    emotions_class_weights = emotions_class_weights.to(device)
+
+    lr = 0.0001
+
+    criterions = {
+        'emotion': nn.CrossEntropyLoss(weight=emotions_class_weights),
+        'sentiment': nn.CrossEntropyLoss()
+    }
+
+    num_epochs = 5
+    num_emotions = len(train_set.get_emotions_dicts()[0].values())
+    num_sentiments = len(train_set.get_sentiments_dicts()[0].values())
+
+    model = MultimodalClassifier(
+        text_fine_tune=False,
+        audio_fine_tune=True,
+        unfreeze_last_n_audio=2,
+        num_emotions=num_emotions,
+        num_sentiments=num_sentiments
+    ).to(device)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    experiment_name = 'TEST'
+
+    print("Training model...")
+
+    model, results = train_and_validate(
+        model, train_loader, dev_loader, 
+        optimizer, criterions, num_epochs, 
+        experiment_name=experiment_name, 
+        device='cuda', save_dir='./saved_results'
+    )
+    
+    print("Training complete.")
+
+
+    #plot_metrics(loaded_results, metric='macro_f1', modality='fused', task='emotions')
+    #true_and_pred_labels = test_and_save_labels(model, test_emb_loader, test_set, criterions, save_path='/kaggle/working')
+
+
+    # for mode in ['confusion_matrix', 'classification_report', 'roc_curve']:
+    # analyze_results_per_class(
+    #     true_and_pred_labels['emotion']['true'], 
+    #     true_and_pred_labels['emotion']['pred'], 
+    #     unique_classes,
+    #     task_name="Emotions",
+    #     mode=mode
+    # )
+
+if __name__ == "__main__":
+    main()
 

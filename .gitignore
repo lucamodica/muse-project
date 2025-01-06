@@ -3,3 +3,10 @@ Raw/
 data/
 raw/
 __pycache__/
+meld*
+my_venv/
+npy_data/
+saved_results/
+train_fbank/
+dev_fbank/
+test_fbank/
