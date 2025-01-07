@@ -21,4 +21,4 @@ ml load Seaborn/0.13.2-gfbf-2023a
 
 source my_venv/bin/activate
 
-python muse-project.py
+python muse-modality-alternating.py

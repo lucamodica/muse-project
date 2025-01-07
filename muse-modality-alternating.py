@@ -27,7 +27,7 @@ from sklearn.preprocessing import label_binarize
 from tqdm import tqdm
 import warnings
 
-from backbone import resnet18
+from backbone_alternating import resnet18
 
 
 
@@ -245,6 +245,7 @@ import time
 
 class MultimodalClassifier(nn.Module):
     def __init__(self,
+                 fusion_dim=768, 
                  audio_model_name="facebook/wav2vec2-base",
                  text_model_name="bert-base-uncased",
                  audio_fine_tune=False,
@@ -273,10 +274,9 @@ class MultimodalClassifier(nn.Module):
 
         # If Wav2Vec2 base has 768 dims and BERT base has 768 dims -> total is 1536
         # If you use average pooling / CLS, that might remain 768 for each
-        self.fusion_dim = hidden_dim + 512
 
-        self.emotion_classifier = nn.Linear(self.fusion_dim, num_emotions)
-        self.sentiment_classifier = nn.Linear(self.fusion_dim, num_sentiments)
+        self.e_shared_classifier = nn.Linear(fusion_dim, num_emotions)
+        self.s_shared_classifier = nn.Linear(fusion_dim, num_sentiments)
 
     def forward(self, audio_array, text):
         """
@@ -287,74 +287,46 @@ class MultimodalClassifier(nn.Module):
         """
 
         audio_array = audio_array.unsqueeze(1)
-        #print(audio_array.shape)
-        #timings = {}
-        
-        # 1) Audio embeddings
-        #start = time.time()
         audio_emb = self.audio_encoder(audio_array)  # shape [1, D]
-        #timings['audio_encoder'] = time.time() - start
         audio_emb = F.adaptive_avg_pool2d(audio_emb, 1)
-
         audio_emb = torch.flatten(audio_emb, 1)
 
-        # 2) Text embeddings
-        #start = time.time()
         text_emb = self.text_encoder(text)  # shape [B, D]
-        #timings['text_encoder'] = time.time() - start
-        # If it's a single item, shape might be [1, D]
-
-        # 3) Fuse (concat)
-        #fused = torch.cat([audio_emb, text_emb], dim=-1)  # shape [B, 2D]
-
-        # 4) Classification
-        #logits = self.classifier(fused)  # shape [B, num_classes]
-
-        #print("Timings:", timings)
-
-        #print("Audio Emb Shape:", audio_emb.shape)
-        #print("Text Emb Shape:", text_emb.shape)
 
         return audio_emb, text_emb
 
 
-def process_task(model, a, t, classifier, weight_size, labels, criterion, device='cuda'):
+def process_task(model, m, e_labels, s_labels, e_reg, s_reg, e_criterion, s_criterion, device='cuda'):
 
     softmax = nn.Softmax(dim=1)
 
-    fused = torch.cat([a, t], dim=-1)
+    e_logits = model.e_shared_classifier(m)
+    s_logits = model.s_shared_classifier(m)
 
-    # --- Compute logits ---
-    logits_fused = classifier(fused)
+    # --- Compute losses ---
+    e_loss = e_criterion(e_logits, e_labels)
+    s_loss = s_criterion(s_logits, s_labels)
 
-    # 2) Audio-only
-    logits_a = (
-        torch.mm(a, torch.transpose(classifier.weight[:, :512], 0, 1))
-        + classifier.bias / 2
-    )
-
-    # 3) Text-only
-    logits_t = (
-        torch.mm(t, torch.transpose(classifier.weight[:, 512 :], 0, 1))
-        + classifier.bias / 2
-    )
-
-    # --- Compute loss ---
-    loss = criterion(logits_fused, labels)
+    combined_loss = e_reg * e_loss + s_reg * s_loss
 
     # --- Predictions ---
-    preds_fused = torch.argmax(softmax(logits_fused), dim=1).detach().cpu().numpy()
-    preds_audio = torch.argmax(softmax(logits_a),      dim=1).detach().cpu().numpy()
-    preds_text  = torch.argmax(softmax(logits_t),      dim=1).detach().cpu().numpy()
 
-    return loss, preds_fused, preds_audio, preds_text
+    preds_e = torch.argmax(softmax(e_logits), dim=1)
+    preds_s = torch.argmax(softmax(s_logits), dim=1)
+
+    return combined_loss, e_loss, s_loss, preds_e, preds_s, e_logits, s_logits
 
 def train_one_epoch(model, dataloader, optimizer, criterions,
                     emotion_reg=0.6, sentiment_reg=0.4, device='cuda'):
     model.train()
 
+    softmax = nn.Softmax(dim=1)
+
     # tracked measures
-    losses = {'emotion': 0.0, 'sentiment': 0.0}
+    losses = {'combined_audio': 0.0, 'audio_emotion': 0.0, 'audio_sentiment': 0.0, 
+              'combined_text': 0.0, 'text_emotion': 0.0, 'text_sentiment': 0.0, 
+              'fused_combined': 0.0, 'fused_emotion': 0.0, 'fused_sentiment': 0.0}
+
     metrics = {'emotion': {'fused': [], 'audio': [], 'text': [], 'labels': []},
                'sentiment': {'fused': [], 'audio': [], 'text': [], 'labels': []}}
 
@@ -372,46 +344,82 @@ def train_one_epoch(model, dataloader, optimizer, criterions,
         # Forward pass for audio and text
         a, t = model(audio_arrays, texts)
 
-        # EMOTION TASK
-        emotion_loss, e_fused, e_audio, e_text = process_task(
-            model=model, 
-            a=a, 
-            t=t, 
-            classifier=model.emotion_classifier,
-            weight_size=model.emotion_classifier.weight.size(1),
-            labels=emotion_labels, 
-            criterion=criterions['emotion']
-        )
-        losses['emotion'] += emotion_loss.item()
-        metrics['emotion']['fused'].extend(e_fused)
-        metrics['emotion']['audio'].extend(e_audio)
-        metrics['emotion']['text'].extend(e_text)
-        metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
+        # ---------------------------- AUDIO MODALITY TRAINING ----------------------------
 
-        # SENTIMENT TASK
-        sentiment_loss, s_fused, s_audio, s_text = process_task(
+        combined_audio_loss, e_audio_loss, s_audio_loss, audio_e_pred, audio_s_pred, audio_e_logits, audio_s_logits = process_task(
             model=model, 
-            a=a, 
-            t=t, 
-            classifier=model.sentiment_classifier,
-            weight_size=model.sentiment_classifier.weight.size(1),
-            labels=sentiment_labels, 
-            criterion=criterions['sentiment']
+            m=a, 
+            e_labels=emotion_labels,
+            s_labels=sentiment_labels,
+            e_reg=emotion_reg,
+            s_reg=sentiment_reg,
+            e_criterion=criterions['emotion'],
+            s_criterion=criterions['sentiment']
         )
-        losses['sentiment'] += sentiment_loss.item()
-        metrics['sentiment']['fused'].extend(s_fused)
-        metrics['sentiment']['audio'].extend(s_audio)
-        metrics['sentiment']['text'].extend(s_text)
-        metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
 
-        # Backprop on weighted loss
-        combined_loss = emotion_reg * emotion_loss + sentiment_reg * sentiment_loss
-        combined_loss.backward()
+        optimizer.zero_grad()
+        combined_audio_loss.backward()
         optimizer.step()
+
+
+        losses['combined_audio'] += combined_audio_loss.item()
+        losses['audio_emotion'] += e_audio_loss.item()
+        losses['audio_sentiment'] += s_audio_loss.item()
+        metrics['emotion']['audio'].extend(audio_e_pred)
+        metrics['sentiment']['audio'].extend(audio_s_pred)
+
+        # ---------------------------- TEXT MODALITY TRAINING ----------------------------
+
+        combined_text_loss, e_text_loss, s_text_loss, text_e_pred, text_s_pred, text_e_logits, text_s_logits = process_task(
+            model=model, 
+            m=t, 
+            e_labels=emotion_labels,
+            s_labels=sentiment_labels,
+            e_reg=emotion_reg,
+            s_reg=sentiment_reg,
+            e_criterion=criterions['emotion'],
+            s_criterion=criterions['sentiment']
+        )
+
+        optimizer.zero_grad()
+        combined_text_loss.backward()
+        optimizer.step()
+
+        losses['combined_text'] += combined_text_loss.item()
+        losses['text_emotion'] += e_text_loss.item()
+        losses['text_sentiment'] += s_text_loss.item()
+        metrics['emotion']['text'].extend(text_e_pred)
+        metrics['sentiment']['text'].extend(text_s_pred)
+
+        # ---------------------------- MODALITY FUSION ----------------------------
+        # Combine the predictions
+        e_logits = (audio_e_logits + text_e_logits) / 2
+        s_logits = (audio_s_logits + text_s_logits) / 2
+
+        # Compute the combined loss
+        e_loss = criterions['emotion'](e_logits, emotion_labels)
+        s_loss = criterions['sentiment'](s_logits, sentiment_labels)
+        combined_loss = emotion_reg * e_loss + sentiment_reg * s_loss
+
+        predictions_e = torch.argmax(softmax(e_logits), dim=1)
+        predictions_s = torch.argmax(softmax(s_logits), dim=1)
+
+        losses['fused_combined'] += combined_loss.item()
+        losses['fused_emotion'] += e_loss.item()
+        losses['fused_sentiment'] += s_loss.item()
+
+        metrics['emotion']['fused'].extend(predictions_e)
+        metrics['sentiment']['fused'].extend(predictions_s)
+
+        # ---------------------------- END ----------------------------
+
+
+        metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
+        metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
     
     # Average losses
-    losses['emotion'] /= len(dataloader)
-    losses['sentiment'] /= len(dataloader)
+    for key in losses.keys():
+        losses[key] /= len(dataloader)
 
     # compute metrics per modality 
     emotion_metrics = {
@@ -428,10 +436,13 @@ def train_one_epoch(model, dataloader, optimizer, criterions,
     return losses, {'emotion': emotion_metrics, 'sentiment': sentiment_metrics}
 
 
-def validate_one_epoch(model, dataloader, criterions, device='cuda'):
+def validate_one_epoch(model, dataloader, criterions, emotion_reg, sentiment_reg, device='cuda'):
     model.eval()
 
-    losses = {'emotion': 0.0, 'sentiment': 0.0}
+    losses = {'combined_audio': 0.0, 'audio_emotion': 0.0, 'audio_sentiment': 0.0, 
+              'combined_text': 0.0, 'text_emotion': 0.0, 'text_sentiment': 0.0, 
+              'fused_combined': 0.0, 'fused_emotion': 0.0, 'fused_sentiment': 0.0}
+
     metrics = {'emotion': {'fused': [], 'audio': [], 'text': [], 'labels': []},
                'sentiment': {'fused': [], 'audio': [], 'text': [], 'labels': []}}
 
@@ -444,41 +455,73 @@ def validate_one_epoch(model, dataloader, criterions, device='cuda'):
             emotion_labels = emotion_labels.to(device)
             sentiment_labels = sentiment_labels.to(device)
 
+            # Forward pass for audio and text
             a, t = model(audio_arrays, texts)
 
-            emotion_loss, e_fused, e_audio, e_text = process_task(
+            # ---------------------------- AUDIO MODALITY VALIDATION ----------------------------
+            combined_audio_loss, e_audio_loss, s_audio_loss, audio_e_pred, audio_s_pred, audio_e_logits, audio_s_logits = process_task(
                 model=model, 
-                a=a, 
-                t=t, 
-                classifier=model.emotion_classifier,
-                weight_size=model.emotion_classifier.weight.size(1),
-                labels=emotion_labels, 
-                criterion=criterions['emotion']
+                m=a, 
+                e_labels=emotion_labels,
+                s_labels=sentiment_labels,
+                e_reg=emotion_reg,
+                s_reg=sentiment_reg,
+                e_criterion=criterions['emotion'],
+                s_criterion=criterions['sentiment']
             )
-            losses['emotion'] += emotion_loss.item()
-            metrics['emotion']['fused'].extend(e_fused)
-            metrics['emotion']['audio'].extend(e_audio)
-            metrics['emotion']['text'].extend(e_text)
-            metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
 
-            sentiment_loss, s_fused, s_audio, s_text = process_task(
+            losses['combined_audio'] += combined_audio_loss.item()
+            losses['audio_emotion'] += e_audio_loss.item()
+            losses['audio_sentiment'] += s_audio_loss.item()
+            metrics['emotion']['audio'].extend(audio_e_pred)
+            metrics['sentiment']['audio'].extend(audio_s_pred)
+
+            # ---------------------------- TEXT MODALITY VALIDATION ----------------------------
+            combined_text_loss, e_text_loss, s_text_loss, text_e_pred, text_s_pred, text_e_logits, text_s_logits = process_task(
                 model=model, 
-                a=a, 
-                t=t, 
-                classifier=model.sentiment_classifier,
-                weight_size=model.sentiment_classifier.weight.size(1),
-                labels=sentiment_labels, 
-                criterion=criterions['sentiment']
+                m=t, 
+                e_labels=emotion_labels,
+                s_labels=sentiment_labels,
+                e_reg=emotion_reg,
+                s_reg=sentiment_reg,
+                e_criterion=criterions['emotion'],
+                s_criterion=criterions['sentiment']
             )
-            losses['sentiment'] += sentiment_loss.item()
-            metrics['sentiment']['fused'].extend(s_fused)
-            metrics['sentiment']['audio'].extend(s_audio)
-            metrics['sentiment']['text'].extend(s_text)
+
+            losses['combined_text'] += combined_text_loss.item()
+            losses['text_emotion'] += e_text_loss.item()
+            losses['text_sentiment'] += s_text_loss.item()
+            metrics['emotion']['text'].extend(text_e_pred)
+            metrics['sentiment']['text'].extend(text_s_pred)
+
+            # ---------------------------- MODALITY FUSION ----------------------------
+            # Combine the predictions
+            e_logits = (audio_e_logits + text_e_logits) / 2
+            s_logits = (audio_s_logits + text_s_logits) / 2
+
+            # Compute the combined loss
+            e_loss = criterions['emotion'](e_logits, emotion_labels)
+            s_loss = criterions['sentiment'](s_logits, sentiment_labels)
+            combined_loss = emotion_reg * e_loss + sentiment_reg * s_loss
+
+            predictions_e = torch.argmax(e_logits, dim=1)
+            predictions_s = torch.argmax(s_logits, dim=1)
+
+            losses['fused_combined'] += combined_loss.item()
+            losses['fused_emotion'] += e_loss.item()
+            losses['fused_sentiment'] += s_loss.item()
+            metrics['emotion']['fused'].extend(predictions_e)
+            metrics['sentiment']['fused'].extend(predictions_s)
+
+            # ---------------------------- END ----------------------------
+            metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
             metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
-            
-        losses['emotion'] /= len(dataloader)
-        losses['sentiment'] /= len(dataloader)
-    
+
+        # Average losses
+        for key in losses.keys():
+            losses[key] /= len(dataloader)
+
+        # compute metrics per modality
         emotion_metrics = {
             'fused': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['fused']),
             'audio': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['audio']),
@@ -489,7 +532,6 @@ def validate_one_epoch(model, dataloader, criterions, device='cuda'):
             'audio': compute_metrics(metrics['sentiment']['labels'], metrics['sentiment']['audio']),
             'text': compute_metrics(metrics['sentiment']['labels'], metrics['sentiment']['text']),
         }
-
     return losses, {'emotion': emotion_metrics, 'sentiment': sentiment_metrics}
 
 def compute_metrics(true_labels, predictions):
@@ -572,34 +614,44 @@ def train_and_validate(model, train_loader, val_loader, optimizer, criterions, n
         val_losses, val_metrics = validate_one_epoch(model, val_loader, criterions, device=device)
 
         print(f"Epoch [{epoch+1}/{num_epochs}]")
+
+        # Print losses
+        print("Losses:")
+        for key, value in losses.items():
+            print(f"\t{key.capitalize().replace('_', ' ')}: {value:.4f}")
+
+        # Print metrics
+        print("\nMetrics:")
         for task in ['emotion', 'sentiment']:
-            print(f"\t{task.capitalize()} Train Loss: {train_losses[task]:.4f}")
-            print(f"\t{task.capitalize()} Val Loss:   {val_losses[task]:.4f}")
+            print(f"\t{task.capitalize()} Metrics:")
             for modality in ['fused', 'audio', 'text']:
-                train_acc = train_metrics[task][modality]['acc'] * 100
-                val_acc = val_metrics[task][modality]['acc'] * 100
-                train_f1 = train_metrics[task][modality]['macro_f1'] * 100
-                val_f1 = val_metrics[task][modality]['macro_f1'] * 100
-                print(f"\t\t{modality.capitalize()} Train Acc: {train_acc:.2f}%, Train F1 (macro): {train_f1:.2f}%")
-                print(f"\t\t{modality.capitalize()} Val Acc:   {val_acc:.2f}%, Val F1 (macro):   {val_f1:.2f}%")
-                print('\n')
+                # Check if there are metrics for the modality
+                if metrics[task][modality]:
+                    # Assuming the list contains accuracy and F1 scores
+                    values = metrics[task][modality]
+                    print(f"\t\t{modality.capitalize()} Metrics: {values}")
+            # Print the labels for the task
+            if metrics[task]['labels']:
+                print(f"\t\tLabels: {metrics[task]['labels']}")
+
+
         print("---------------------------------------------------------------\n")
 
-        # Save results for both tasks
-        results['results_emotions'].append({
-            'epoch': epoch + 1,
-            'train_loss': train_losses['emotion'],
-            'val_loss': val_losses['emotion'],
-            'train_metrics': train_metrics['emotion'],
-            'val_metrics': val_metrics['emotion']
-        })
-        results['results_sentiments'].append({
-            'epoch': epoch + 1,
-            'train_loss': train_losses['sentiment'],
-            'val_loss': val_losses['sentiment'],
-            'train_metrics': train_metrics['sentiment'],
-            'val_metrics': val_metrics['sentiment']
-        })
+        # # Save results for both tasks
+        # results['results_emotions'].append({
+        #     'epoch': epoch + 1,
+        #     'train_loss': train_losses['emotion'],
+        #     'val_loss': val_losses['emotion'],
+        #     'train_metrics': train_metrics['emotion'],
+        #     'val_metrics': val_metrics['emotion']
+        # })
+        # results['results_sentiments'].append({
+        #     'epoch': epoch + 1,
+        #     'train_loss': train_losses['sentiment'],
+        #     'val_loss': val_losses['sentiment'],
+        #     'train_metrics': train_metrics['sentiment'],
+        #     'val_metrics': val_metrics['sentiment']
+        # })
 
     # Save model state
     results['model_state_dict'] = model.state_dict()
