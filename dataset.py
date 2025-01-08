@@ -1,81 +1,60 @@
-from moviepy.editor import VideoFileClip
-import os
 from torch.utils.data import Dataset
-import os
-import pandas as pd
+import torch
 import numpy as np
-import librosa
+import pandas as pd
 
-def extract_audio(input_video_path, output_audio_path):
-    # Ensure that the output directory exists
-    output_dir = os.path.dirname(output_audio_path)
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-    # Load the video file
-    video = VideoFileClip(input_video_path)
-
-    # Write audio directly to a file
-    video.audio.write_audiofile(
-        output_audio_path, fps=44100, verbose=False, logger=None)
-
-    # Close the video clip
-    video.close()
 
 class MELDDataset(Dataset):
-    """
-    A simple Dataset for IEMOCAP-like data, where each entry has:
-      - audio_path: Path to the .wav file
-      - transcript: The text transcript
-      - label: The emotion label (int)
-    """
-
-    def __init__(self, csv_file, root_dir='./data', transform=None):
-        """
-        :param csv_file: Path to a CSV file (or txt) listing [audio_path, transcript, label].
-        :param transform: Optional audio transform (torchaudio transforms or custom).
-        """
+    def __init__(self, csv_file, root_dir='./data', mode="train", transform=None, target_sr=16000):
         self.samples = []
         self.transform = transform
+        self.target_sr = target_sr
 
-        df = pd.read_csv(csv_file)
+        df = pd.read_csv(f'{root_dir}/{csv_file}')
         for _, row in df.iterrows():
-          file_name = f'dia{row["Dialogue_ID"]}_utt{row["Utterance_ID"]}'
-          video_path = f'{root_dir}/video/{file_name}.mp4'
-          audio_path = f'{root_dir}/audio/{file_name}.wav'
-          
-          if not os.path.exists(audio_path):
-            extract_audio(video_path, audio_path)
-          
-          self.samples.append((
-            audio_path,
-            row["Utterance"], 
-            row["Emotion"],
-            row['Sentiment']
-          ))
-          
-    def get_emotions_list(self):
-        return [sample[2] for sample in self.samples]
-    
-    def get_sentiments_list(self):
-        return [sample[3] for sample in self.samples]
+            file_name = f'dia{row["Dialogue_ID"]}_utt{row["Utterance_ID"]}'
+            video_path = f'{root_dir}/video/{file_name}.mp4'
+            audio_path = f'{root_dir}/audio/{file_name}.wav'
+            npy_path   = f'{mode}_fbank/{file_name}.npy'
+
+            self.samples.append((
+                npy_path,
+                row["Utterance"], 
+                row["Emotion"],
+                row["Sentiment"]
+            ))
+
+    def get_emotions_dicts(self):
+        labels = list(set([sample[2] for sample in self.samples]))
+        int_to_str = {idx: label for idx, label in enumerate(labels)}
+        str_to_int = {emotion: idx for idx, emotion in int_to_str.items()}
+        return int_to_str, str_to_int
+
+    def get_sentiments_dicts(self):
+        labels = list(set([sample[3] for sample in self.samples]))
+        int_to_str = {idx: label for idx, label in enumerate(labels)}
+        str_to_int = {sentiment: idx for idx, sentiment in int_to_str.items()}
+        return int_to_str, str_to_int
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        audio_path, transcript, emotion, sentiment = self.samples[idx]
+        npy_path, transcript, emotion, sentiment = self.samples[idx]
+        emotion_to_int = self.get_emotions_dicts()[1]
+        sentiment_to_int = self.get_sentiments_dicts()[1]
 
-        # waveform, sample_rate = torchaudio.load(audio_path)
-        audio_array, sample_rate = librosa.load(audio_path)
+        # Load the resampled audio from .npy
+        audio_array = np.load(npy_path)
+
         if self.transform:
             audio_array = self.transform(audio_array)
 
-        # Return raw waveform, transcript string, and label
-        return {
-            'audio_array': audio_array,
-            'sampling_rate': sample_rate,
-            'transcript': transcript,
-            'emotion': emotion,
-            'sentiment': sentiment
-        }
+        audio_tensor = torch.tensor(audio_array, dtype=torch.float)
+
+        return (
+            audio_tensor,         # [T]
+            transcript,
+            emotion_to_int[emotion],
+            sentiment_to_int[sentiment]
+        )

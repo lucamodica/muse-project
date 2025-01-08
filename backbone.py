@@ -1,6 +1,5 @@
 import torch.nn as nn
 
-
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
@@ -83,6 +82,10 @@ class ResNet(nn.Module):
                                    bias=False)
         else:
             raise NotImplementedError('Incorrect modality, should be audio or visual but got {}'.format(modality))
+
+        self.out_conv = nn.Conv2d(512 * block.expansion, 768, kernel_size=1, stride=1, bias=False)
+        
+
         self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -155,6 +158,9 @@ class ResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
+
+        x = self.out_conv(x)  # Now x has shape [B, 768, H_out, W_out]
+
         out = x
 
         return out
