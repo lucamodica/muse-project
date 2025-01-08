@@ -1,0 +1,44 @@
+This job can be monitored from: https://job.c3se.chalmers.se/alvis/3365672
+Loading data...
+Data loaded.
+Data loaders created.
+Number of emotions: 7
+Number of sentiments: 3
+Emotion neutral count: 4709
+Emotion joy count: 1743
+Emotion surprise count: 1205
+Emotion anger count: 1109
+Emotion sadness count: 683
+Emotion fear count: 268
+Sentiment neutral count: 4709
+Sentiment positive count: 2334
+Sentiment negative count: 2945
+Training model...
+Training:   0%|          | 0/260 [00:00<?, ?it/s]/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/main.py:101: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  emotion_tensor = torch.tensor(emotion_list, dtype=torch.long, device=device)
+/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/main.py:102: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  sentiment_tensor = torch.tensor(sentiment_list, dtype=torch.long, device=device)
+/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/main.py:111: UserWarning: To copy construct from a tensor, it is recommended to use sourceTensor.clone().detach() or sourceTensor.clone().detach().requires_grad_(True), rather than torch.tensor(sourceTensor).
+  audio_array = torch.tensor(fbank_list).to(device)
+                                                 Number of utterances in this conversation: 16
+Audio array shape: torch.Size([16, 1024, 128])
+Audio array shape: torch.Size([16, 1, 1024, 128])
+Audio shape:  torch.Size([16, 768])
+
+
+
+
+
+Traceback (most recent call last):
+  File "/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/main.py", line 447, in <module>
+    main()
+  File "/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/main.py", line 424, in main
+    model, results = train_and_validate(args,
+                     ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/main.py", line 316, in train_and_validate
+    train_losses, train_metrics = train_one_epoch(model, train_loader, optimizer, criterions, device=device)
+                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/main.py", line 115, in train_one_epoch
+    emotion_logits, sentiment_logits = model(audio_array, text_list)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+TypeError: cannot unpack non-iterable NoneType object
