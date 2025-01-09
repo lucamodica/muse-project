@@ -19,12 +19,10 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Subset
 import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 from sklearn.preprocessing import label_binarize
 from tqdm import tqdm
 import warnings
-from tabulate import tabulate
 from pprint import pprint
 
 from backbone import resnet18
