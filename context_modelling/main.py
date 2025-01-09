@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from transformers import BertTokenizer, BertModel, Wav2Vec2Processor, Wav2Vec2Model
 from sklearn.metrics import classification_report, f1_score, balanced_accuracy_score
 import joblib
-from pprint import pprint
 import torch
 from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
@@ -373,26 +372,18 @@ def main():
     print("\n")
 
     #get weights for balancing classes
-
     class_counts = train_set.emotion_class_counts
     total_samples = 0
     for key in class_counts:
         total_samples += class_counts[key]
-
     print("Total samples:", total_samples)
 
     class_weights = torch.zeros(len(class_counts))
     for i in range(len(class_counts)):
         class_weights[i] = class_counts[i] / total_samples
-
-    #invert the weights
-    class_weights = 1 / class_weights
-
-    #normalize the weights
-    class_weights = class_weights / class_weights.sum()
-
+    class_weights = 1 / class_weights  # invert the weights
+    class_weights = class_weights / class_weights.sum()  # normalize the weights
     class_weights = class_weights.to(device)
-
     print("Class weights:", class_weights)
 
 

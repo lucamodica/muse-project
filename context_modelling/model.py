@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModel, AutoProcessor, BertTokenizer, DistilBertModel, DistilBertTokenizer
+from transformers import AutoModel, AutoProcessor, DistilBertTokenizer
 from torch.functional import F
 
 

@@ -4,6 +4,11 @@ import pandas as pd
 import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
+import nltk
+
+# Ensure NLTK data is downloaded
+nltk.download('punkt')
+nltk.download('stopwords')
 
 class MELDConversationDataset(Dataset):
     def __init__(self, csv_file, root_dir='./data', mode="train", text_processor=None):
@@ -117,7 +122,6 @@ class MELDConversationDataset(Dataset):
         }
 
 
-
 def meld_collate_fn(batch):
     # batch is a list of conversation dicts (one per item in dataset)
     # We can combine them into a single batch, 
@@ -151,8 +155,4 @@ def meld_collate_fn(batch):
     }
     
 def custom_text_preprocessor(text):
-    # Example: Convert to lowercase and remove punctuation
-    import re
-    text = text.lower()
-    text = re.sub(r"[^\w\s]", "", text)
     return text
