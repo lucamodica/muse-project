@@ -47,8 +47,7 @@ def process_task(model, a, t, classifier, weight_size, labels, criterion, device
 
     return loss, preds_fused, preds_audio, preds_text
 
-def train_one_epoch(model, dataloader, optimizer, criterions,
-                    emotion_reg=0.6, sentiment_reg=0.4, device='cuda'):
+def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.6, sentiment_reg=0.4, device='cuda'):
     model.train()
 
     # tracked measures

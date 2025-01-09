@@ -6,7 +6,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 class MELDConversationDataset(Dataset):
-    def __init__(self, csv_file, root_dir='./data', mode="train"):
+    def __init__(self, csv_file, root_dir='./data', mode="train", text_processor=None):
         """
         We'll store a list of (dialog_id, [list_of_utterance_dicts]).
         Each utterance_dict might contain:
@@ -149,3 +149,10 @@ def meld_collate_fn(batch):
         "emotion_lists": emotion_lists,
         "sentiment_lists": sentiment_lists
     }
+    
+def custom_text_preprocessor(text):
+    # Example: Convert to lowercase and remove punctuation
+    import re
+    text = text.lower()
+    text = re.sub(r"[^\w\s]", "", text)
+    return text
