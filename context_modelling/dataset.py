@@ -19,13 +19,28 @@ class MELDConversationDataset(Dataset):
         """
         df = pd.read_csv(f'{root_dir}/{csv_file}')
 
+        #order the df rows according to dialogueID and each dialogue according to utteranceID
+        df = df.sort_values(by=['Dialogue_ID', 'Utterance_ID'])
+
         self.emotion_class_counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
         self.sentiment_class_counts = {0: 0, 1: 0, 2: 0}
+        self.max_utterance_size = 0
         
         self.dialogues = {}  # key: dialogue_id, value: list of utterance dicts
+        prev_dia_id = None
+        utt_count = 0
+
         for _, row in df.iterrows():
+
             dia_id = row["Dialogue_ID"]
             utt_id = row["Utterance_ID"]
+
+            if prev_dia_id == dia_id:
+                utt_count += 1
+            else:
+                if utt_count > self.max_utterance_size:
+                    self.max_utterance_size = utt_count
+                utt_count = 1
             
             fbank_path = f'../{mode}_fbank/dia{dia_id}_utt{utt_id}.npy'
 
@@ -49,6 +64,9 @@ class MELDConversationDataset(Dataset):
             if dia_id not in self.dialogues:
                 self.dialogues[dia_id] = []
             self.dialogues[dia_id].append(utter_dict)
+
+            prev_dia_id = dia_id
+
         
         # Convert to list of (dialog_id, list_of_utterances)
         self.dialogues = [(k, sorted(v, key=lambda x: x["fbank_path"])) for k, v in self.dialogues.items()]

@@ -51,7 +51,7 @@ def get_arguments():
     return parser.parse_args()
 
 
-def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.6, sentiment_reg=0.4, device='cuda'):
+def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.5, sentiment_reg=0.5, device='cuda'):
     model.train()
 
     losses = {'emotion': 0.0, 'sentiment': 0.0}
@@ -60,29 +60,12 @@ def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.6, s
         'sentiment': {'fused': [], 'labels': []}
     }
 
-
-    # 1 batch in dataloader = 4 dialogs (batch size 4)
-    # process each dialog independently (1 forward for each)
-    # 1 dialog = 14 utterances (new batch size 14)
-
-
-
     loop = tqdm(dataloader, desc="Training", leave=False)
     
     for batch in loop:
-        # batch is a dict with fields: 
-        #  "dialog_ids": [conv1_id, conv2_id, ...]
-        #  "fbank_lists": [[utt1_fbank, utt2_fbank, ...], [utt1_fbank, ...], ...]
-        #  "text_lists": [[str_utt1, str_utt2, ...], [str_utt1, ...], ...]
-        #  "emotion_lists": [[e1, e2, ...], [e1, ...], ...]
-        #  "sentiment_lists": [[s1, s2, ...], [s1, ...], ...]
-        
-        # We might have multiple conversations in this batch => batch_size = len(batch["dialog_ids"])
-        
         batch_emotion_loss = 0.0
         batch_sentiment_loss = 0.0
 
-        # We'll store predictions/labels for metrics across all convs in this batch
         batch_emotion_preds = []
         batch_emotion_labels = []
         batch_sentiment_preds = []
@@ -94,87 +77,77 @@ def train_one_epoch(model, dataloader, optimizer, criterions, emotion_reg=0.6, s
             emotion_list    = batch["emotion_lists"][b_idx]
             sentiment_list  = batch["sentiment_lists"][b_idx]
 
-            emotion_tensor = torch.tensor(emotion_list, dtype=torch.long, device=device)
-            sentiment_tensor = torch.tensor(sentiment_list, dtype=torch.long, device=device)
+            # Determine the actual number of utterances before padding
+            actual_len = len(emotion_list)  # Number of real utterances in this conversation
 
-            print("Number of utterances in this conversation:", len(fbank_list))
+            # Convert lists to tensors
+            emotion_tensor = torch.as_tensor(emotion_list, dtype=torch.long, device=device)
+            sentiment_tensor = torch.as_tensor(sentiment_list, dtype=torch.long, device=device)
+            audio_array = torch.as_tensor(fbank_list, dtype=torch.float, device=device)
 
-            # Make a batch of audio utterances
-            audio_array = torch.tensor(fbank_list).to(device)
-            audio_array = audio_array.unsqueeze(1)
+            audio_array = audio_array.unsqueeze(1)  # adjust dimensions as needed
 
-
+            # Forward pass
             emotion_logits, sentiment_logits = model(audio_array, text_list)
 
-
+            # If outputs have shape (1, seq_len, num_classes), squeeze the batch dimension
             if len(emotion_logits.shape) == 3:
-                # (1, S_b, num_classes)
                 emotion_logits = emotion_logits.squeeze(0) 
                 sentiment_logits = sentiment_logits.squeeze(0)
+
+            # Slice the logits and tensors to ignore padded timesteps
+            # emotion_logits shape assumed to be (max_utt, num_classes) at this point
+            emotion_logits = emotion_logits[:actual_len]
+            sentiment_logits = sentiment_logits[:actual_len]
+
+            emotion_tensor = emotion_tensor[:actual_len]
+            sentiment_tensor = sentiment_tensor[:actual_len]
 
             # Compute Loss
             e_loss = criterions['emotion'](emotion_logits, emotion_tensor)
             s_loss = criterions['sentiment'](sentiment_logits, sentiment_tensor)
 
-            # We can sum up or average losses across convs
             batch_emotion_loss += e_loss
             batch_sentiment_loss += s_loss
 
-            # Predictions
+            # Predictions for non-padded time steps
             e_preds = torch.argmax(emotion_logits, dim=-1).detach().cpu().numpy()
             s_preds = torch.argmax(sentiment_logits, dim=-1).detach().cpu().numpy()
 
-            # Collect predictions and labels
             batch_emotion_preds.extend(e_preds)
             batch_emotion_labels.extend(emotion_list)
 
             batch_sentiment_preds.extend(s_preds)
             batch_sentiment_labels.extend(sentiment_list)
 
-        # --- Now we have losses for each conversation in the batch. 
-        #     We can average them or sum them, then do backprop. ---
-        # Let's average:
-        batch_emotion_loss = batch_emotion_loss / len(batch["dialog_ids"])
-        batch_sentiment_loss = batch_sentiment_loss / len(batch["dialog_ids"])
+        # Average and combine losses over conversations in batch
+        batch_emotion_loss /= len(batch["dialog_ids"])
+        batch_sentiment_loss /= len(batch["dialog_ids"])
 
         combined_loss = emotion_reg * batch_emotion_loss + sentiment_reg * batch_sentiment_loss
         optimizer.zero_grad()
         combined_loss.backward()
         optimizer.step()
 
-        # Accumulate for the entire epoch
         losses['emotion'] += batch_emotion_loss.item()
         losses['sentiment'] += batch_sentiment_loss.item()
 
-        # Add these batch predictions to the "epoch-level" metrics
         metrics['emotion']['fused'].extend(batch_emotion_preds)
         metrics['emotion']['labels'].extend(batch_emotion_labels)
 
         metrics['sentiment']['fused'].extend(batch_sentiment_preds)
         metrics['sentiment']['labels'].extend(batch_sentiment_labels)
 
-    # Average the losses across all steps in the DataLoader
     losses['emotion'] /= len(dataloader)
     losses['sentiment'] /= len(dataloader)
 
-    # Compute epoch-level metrics
-    emotion_metrics = compute_metrics(
-        metrics['emotion']['labels'],
-        metrics['emotion']['fused']
-    )
-    sentiment_metrics = compute_metrics(
-        metrics['sentiment']['labels'],
-        metrics['sentiment']['fused']
-    )
+    emotion_metrics = compute_metrics(metrics['emotion']['labels'], metrics['emotion']['fused'])
+    sentiment_metrics = compute_metrics(metrics['sentiment']['labels'], metrics['sentiment']['fused'])
 
-    # Return same structure as before
-    # If you also want "audio vs. text" alone, you'd need separate calls or separate heads.
-    # For now, let's keep it simpler (fused). 
     return losses, {
         'emotion': {'fused': emotion_metrics},
         'sentiment': {'fused': sentiment_metrics}
     }
-
 
 def validate_one_epoch(model, dataloader, criterions, device='cuda'):
     model.eval()
@@ -191,42 +164,61 @@ def validate_one_epoch(model, dataloader, criterions, device='cuda'):
         for batch in loop:
             batch_emotion_loss = 0.0
             batch_sentiment_loss = 0.0
+
             batch_emotion_preds = []
             batch_emotion_labels = []
             batch_sentiment_preds = []
             batch_sentiment_labels = []
 
             for b_idx in range(len(batch["dialog_ids"])):
-                fbank_list      = batch["fbank_lists"][b_idx]
-                text_list       = batch["text_lists"][b_idx]
+                fbank_list      = batch["fbank_lists"][b_idx]       
+                text_list       = batch["text_lists"][b_idx]        
                 emotion_list    = batch["emotion_lists"][b_idx]
                 sentiment_list  = batch["sentiment_lists"][b_idx]
 
-                emotion_tensor = torch.tensor(emotion_list, dtype=torch.long, device=device)
-                sentiment_tensor = torch.tensor(sentiment_list, dtype=torch.long, device=device)
+                # Determine the actual number of utterances before padding
+                actual_len = len(emotion_list)
+
+                # Convert lists to tensors
+                emotion_tensor = torch.as_tensor(emotion_list, dtype=torch.long, device=device)
+                sentiment_tensor = torch.as_tensor(sentiment_list, dtype=torch.long, device=device)
+                audio_array = torch.as_tensor(fbank_list, dtype=torch.float, device=device)
+
+                audio_array = audio_array.unsqueeze(1)  # adjust dimensions as needed
 
                 # Forward pass
-                emotion_logits, sentiment_logits = model(fbank_list, text_list)
-                
+                emotion_logits, sentiment_logits = model(audio_array, text_list)
+
+                # If outputs have shape (1, seq_len, num_classes), squeeze the batch dimension
                 if len(emotion_logits.shape) == 3:
-                    emotion_logits = emotion_logits.squeeze(0)
+                    emotion_logits = emotion_logits.squeeze(0) 
                     sentiment_logits = sentiment_logits.squeeze(0)
 
+                # Slice the logits and tensors to ignore padded timesteps
+                emotion_logits = emotion_logits[:actual_len]
+                sentiment_logits = sentiment_logits[:actual_len]
+
+                emotion_tensor = emotion_tensor[:actual_len]
+                sentiment_tensor = sentiment_tensor[:actual_len]
+
+                # Compute Loss
                 e_loss = criterions['emotion'](emotion_logits, emotion_tensor)
                 s_loss = criterions['sentiment'](sentiment_logits, sentiment_tensor)
 
                 batch_emotion_loss += e_loss
                 batch_sentiment_loss += s_loss
 
+                # Predictions for non-padded time steps
                 e_preds = torch.argmax(emotion_logits, dim=-1).detach().cpu().numpy()
                 s_preds = torch.argmax(sentiment_logits, dim=-1).detach().cpu().numpy()
 
                 batch_emotion_preds.extend(e_preds)
                 batch_emotion_labels.extend(emotion_list)
+
                 batch_sentiment_preds.extend(s_preds)
                 batch_sentiment_labels.extend(sentiment_list)
 
-            # Average across convs in this batch
+            # Average and combine losses over conversations in batch
             batch_emotion_loss /= len(batch["dialog_ids"])
             batch_sentiment_loss /= len(batch["dialog_ids"])
 
@@ -235,25 +227,21 @@ def validate_one_epoch(model, dataloader, criterions, device='cuda'):
 
             metrics['emotion']['fused'].extend(batch_emotion_preds)
             metrics['emotion']['labels'].extend(batch_emotion_labels)
+
             metrics['sentiment']['fused'].extend(batch_sentiment_preds)
             metrics['sentiment']['labels'].extend(batch_sentiment_labels)
 
         losses['emotion'] /= len(dataloader)
         losses['sentiment'] /= len(dataloader)
 
-        emotion_metrics = compute_metrics(
-            metrics['emotion']['labels'],
-            metrics['emotion']['fused']
-        )
-        sentiment_metrics = compute_metrics(
-            metrics['sentiment']['labels'],
-            metrics['sentiment']['fused']
-        )
+        emotion_metrics = compute_metrics(metrics['emotion']['labels'], metrics['emotion']['fused'])
+        sentiment_metrics = compute_metrics(metrics['sentiment']['labels'], metrics['sentiment']['fused'])
 
     return losses, {
         'emotion': {'fused': emotion_metrics},
         'sentiment': {'fused': sentiment_metrics}
     }
+
 
 def compute_metrics(true_labels, predictions):
     """
@@ -308,7 +296,7 @@ def train_and_validate(args, model, train_loader, val_loader, optimizer, criteri
         for task in ['emotion', 'sentiment']:
             print(f"\t{task.capitalize()} Train Loss: {train_losses[task]:.4f}")
             print(f"\t{task.capitalize()} Val Loss:   {val_losses[task]:.4f}")
-            for modality in ['fused', 'audio', 'text']:
+            for modality in ['fused']:
                 train_acc = train_metrics[task][modality]['balanced_acc'] * 100
                 val_acc = val_metrics[task][modality]['balanced_acc'] * 100
                 train_f1 = train_metrics[task][modality]['macro_f1'] * 100
@@ -377,31 +365,59 @@ def main():
     print("Number of emotions:", num_emotions)
     print("Number of sentiments:", num_sentiments)
 
-    for i in range(6):
+    for i in range(7):
         print(f"Emotion {train_set.emotion_to_str(i)} count:", train_set.emotion_class_counts[i])
     for i in range(3):
         print(f"Sentiment {train_set.sentiment_to_str(i)} count:", train_set.sentiment_class_counts[i])
 
-    # emotion_class_weights = compute_emotion_class_weights(train_set, device)
-    # print("Computed class weights on device:", emotion_class_weights)
+    print("\n")
+
+    #get weights for balancing classes
+
+    class_counts = train_set.emotion_class_counts
+    total_samples = 0
+    for key in class_counts:
+        total_samples += class_counts[key]
+
+    print("Total samples:", total_samples)
+
+    class_weights = torch.zeros(len(class_counts))
+    for i in range(len(class_counts)):
+        class_weights[i] = class_counts[i] / total_samples
+
+    #invert the weights
+    class_weights = 1 / class_weights
+
+    #normalize the weights
+    class_weights = class_weights / class_weights.sum()
+
+    class_weights = class_weights.to(device)
+
+    print("Class weights:", class_weights)
+
 
     lr = args.lr
 
     criterions = {
-        #'emotion': nn.CrossEntropyLoss(weight=emotion_class_weights),
-        'emotion': nn.CrossEntropyLoss(),
+        'emotion': nn.CrossEntropyLoss(weight=class_weights),
         'sentiment': nn.CrossEntropyLoss()
     }
 
     num_epochs = args.epochs
 
+    #set max utterance size to be the max of all train dev and test sets
+    max_utt = max(train_set.max_utterance_size, dev_set.max_utterance_size, test_set.max_utterance_size)
+
+    print("Max utterance size:", max_utt)
+
     model = MultimodalClassifierWithLSTM(
-        fusion_lstm= FusionLSTM(input_dim=768, hidden_dim=256, num_layers=1, bidirectional=True, dropout=0.1),
+        fusion_lstm=FusionLSTM(input_dim=1536, hidden_dim=256, num_layers=1, bidirectional=True, dropout=0.2),
         audio_encoder=resnet18(modality='audio'),
-        text_encoder=TextEncoder(),
+        text_encoder=TextEncoder(fine_tune=True, unfreeze_last_n_layers=1),
         hidden_dim=256,
         num_emotions=num_emotions,
-        num_sentiments=num_sentiments
+        num_sentiments=num_sentiments,
+        max_utt=max_utt
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0001)

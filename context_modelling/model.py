@@ -120,12 +120,7 @@ class TextEncoder(nn.Module):
         return cls_emb
 
 class FusionLSTM(nn.Module):
-    def __init__(self, 
-                 input_dim,      # e.g., audio_emb_dim + text_emb_dim
-                 hidden_dim=256, 
-                 num_layers=1, 
-                 bidirectional=False, 
-                 dropout=0.1):
+    def __init__(self, input_dim, hidden_dim=256, num_layers=1, bidirectional=False, dropout=0.1):
         super(FusionLSTM, self).__init__()
         self.lstm = nn.LSTM(
             input_size=input_dim,
@@ -146,19 +141,14 @@ class FusionLSTM(nn.Module):
         return output, (hn, cn)  # output is the sequence of hidden states
 
 class MultimodalClassifierWithLSTM(nn.Module):
-    def __init__(self,
-                 audio_encoder,     # frozen or partially frozen
-                 text_encoder,      # frozen or partially frozen
-                 fusion_lstm,       # the LSTM module
-                 hidden_dim=256,
-                 num_emotions=7,
-                 num_sentiments=3):
+    def __init__(self, audio_encoder, text_encoder, fusion_lstm, hidden_dim=256, num_emotions=7, num_sentiments=3, max_utt=50):
         super(MultimodalClassifierWithLSTM, self).__init__()
         self.audio_encoder = audio_encoder
         self.text_encoder = text_encoder
         self.fusion_lstm = fusion_lstm  # e.g., an instance of FusionLSTM
-        self.emotion_head = nn.Linear(hidden_dim, num_emotions)
-        self.sentiment_head = nn.Linear(hidden_dim, num_sentiments)
+        self.emotion_head = nn.Linear(hidden_dim*2, num_emotions)
+        self.sentiment_head = nn.Linear(hidden_dim*2, num_sentiments)
+        self.max_utt = max_utt
     
     def forward(self, audio_dialog_utts, text_dialog_utts):
        
@@ -166,44 +156,36 @@ class MultimodalClassifierWithLSTM(nn.Module):
         audio_emb = F.adaptive_avg_pool2d(audio_emb, 1)
         audio_emb = torch.flatten(audio_emb, 1)
 
-        #apply audio forward to each element of the list
-        # 1. text and audio embeddings utterance level
-        # 2. combining the embeddings (utterance level)
-        # 3. build again the sequnce of utterances by concatenating them into the same dialogue
-        #    (the size would be (1, max_utt))
-        # 4. 
-        
-        
-        # Suppose text_batch is a list of lists of strings:
-        # text_batch[b][s] => the text for utterance s in conversation b
-        # We'll flatten similarly.
-        text_list = []
-        for b_idx in range(B):
-            for s_idx in range(S):
-                text_list.append(text_batch[b_idx][s_idx])
-        
-        text_emb = self.text_encoder(text_list)  # => (B*S, text_enc_dim)
+        text_emb = [self.text_encoder(utt) for utt in text_dialog_utts]
+        text_emb = torch.stack(text_emb)  # shape (B, hidden_dim)
+
+        text_emb = text_emb.squeeze(1)
+
+
+        #print("Final Audio emb shape: ", audio_emb.shape)
+        #print("Final Text emb shape: ", text_emb.shape)
         
         # Combine
-        fused_emb = torch.cat([audio_emb, text_emb], dim=-1)  # (B*S, audio_enc_dim + text_enc_dim)
+        fused_emb = torch.cat([audio_emb, text_emb], dim=-1)  # (utts, audio_enc_dim + text_enc_dim)
+
         
         # Reshape back to (B, S, fused_dim) for the LSTM
-        fused_emb = fused_emb.view(B, S, -1)
+        fused_emb = fused_emb.unsqueeze(0)  # (1, utts, audio_enc_dim + text_enc_dim)
+
+        padded_fused_emb = F.pad(fused_emb, (0, 0, 0, self.max_utt - fused_emb.size(1)))
         
         # Pass through LSTM
-        lstm_out, (hn, cn) = self.fusion_lstm(fused_emb)  # (B, S, hidden_dim), (num_layers, B, hidden_dim)
-        
-        # Option 1: Take the last hidden state from each sequence
-        # If you want a single prediction per conversation, 
-        # you might use hn[-1] => shape (B, hidden_dim).
-        # If you want a prediction per utterance, you can process `lstm_out` at each time step.
-        
-        # For multi-task classification at the last step:
-        final_rep = hn[-1]  # shape (B, hidden_dim)
-        
-        # Emotions
-        emotion_logits = self.emotion_head(final_rep)  # (B, num_emotions)
-        # Sentiments
-        sentiment_logits = self.sentiment_head(final_rep)  # (B, num_sentiments)
-        
+        lstm_out, (hn, cn) = self.fusion_lstm(padded_fused_emb)
+
+        #print("LSTM out shape: ", lstm_out.shape)
+
+        lstm_out = lstm_out.squeeze(0)
+
+        # Classification heads
+
+        emotion_logits = self.emotion_head(lstm_out)
+        sentiment_logits = self.sentiment_head(lstm_out)
+
         return emotion_logits, sentiment_logits
+
+        
