@@ -10,4 +10,7 @@ saved_results/
 train_fbank/
 dev_fbank/
 test_fbank/
-images/
+images/.DS_Store
+.DS_Store
+test_dataloader.py
+try_mp_for_muse.ipynb
