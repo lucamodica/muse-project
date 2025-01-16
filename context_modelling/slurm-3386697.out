@@ -1,0 +1,27 @@
+This job can be monitored from: https://job.c3se.chalmers.se/alvis/3386697
+Special tokens have been added in the vocabulary, make sure the associated word embeddings are fine-tuned or trained.
+Loading data...
+Data loaded.
+Data loaders created.
+Number of emotions: 7
+Number of sentiments: 3
+Emotion neutral count: 0
+Emotion joy count: 0
+Emotion surprise count: 0
+Emotion anger count: 0
+Emotion sadness count: 0
+Emotion fear count: 0
+Emotion disgust count: 0
+Sentiment neutral count: 0
+Sentiment positive count: 0
+Sentiment negative count: 0
+
+
+Total samples: 0
+Traceback (most recent call last):
+  File "/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/mainv2.py", line 528, in <module>
+    main()
+  File "/mimer/NOBACKUP/groups/naiss2024-22-578/muse-project/context_modelling/mainv2.py", line 437, in main
+    class_weights[i] = class_counts[i] / total_samples
+                       ~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~
+ZeroDivisionError: division by zero

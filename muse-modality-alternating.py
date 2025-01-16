@@ -27,6 +27,7 @@ from tqdm import tqdm
 import warnings
 from tabulate import tabulate
 from pprint import pprint
+import torch.optim as optim
 
 from backbone import resnet18
 
@@ -49,30 +50,6 @@ def get_arguments():
     parser.add_argument("--experiment_name", type=str, default="Experiment", help="Name of the experiment")
 
     return parser.parse_args()
-
-
-def process_task(args, model, m, e_labels, s_labels, e_reg, s_reg, e_criterion, s_criterion, device='cuda'):
-
-    softmax = nn.Softmax(dim=1)
-
-    combined_loss, e_loss, s_loss = None, None, None
-    preds_e, preds_s = None, None
-    e_logits, s_logits = None, None
-
-    if args.emotion_task:
-        e_logits = model.e_shared_classifier(m)
-        e_loss = e_criterion(e_logits, e_labels)
-        preds_e = torch.argmax(softmax(e_logits), dim=1).detach().cpu().numpy()
-
-    if args.sentiment_task:
-        s_logits = model.s_shared_classifier(m)
-        s_loss = s_criterion(s_logits, s_labels)
-        preds_s = torch.argmax(softmax(s_logits), dim=1).detach().cpu().numpy()
-
-    if args.emotion_task and args.sentiment_task:
-        combined_loss = e_reg * e_loss + s_reg * s_loss if args.emotion_task and args.sentiment_task else None
-
-    return combined_loss, e_loss, s_loss, preds_e, preds_s, e_logits, s_logits
 
 def initialize_losses_and_metrics(args):
     # tracked measures
@@ -113,9 +90,31 @@ def initialize_losses_and_metrics(args):
 
     return losses, metrics
 
+def process_task(args, model, m, e_labels, s_labels, e_reg, s_reg, e_criterion, s_criterion, device='cuda'):
 
-def train_one_epoch(args, model, dataloader, optimizer, criterions,
-                    emotion_reg=0.6, sentiment_reg=0.4, device='cuda'):
+    softmax = nn.Softmax(dim=1)
+
+    combined_loss, e_loss, s_loss = None, None, None
+    preds_e, preds_s = None, None
+    e_logits, s_logits = None, None
+
+    if args.emotion_task:
+        e_logits = model.emotion_classifier(m)
+        e_loss = e_criterion(e_logits, e_labels)
+        preds_e = torch.argmax(softmax(e_logits), dim=1).detach().cpu().numpy()
+
+    if args.sentiment_task:
+        s_logits = model.sentiment_classifier(m)
+        s_loss = s_criterion(s_logits, s_labels)
+        preds_s = torch.argmax(softmax(s_logits), dim=1).detach().cpu().numpy()
+
+    if args.emotion_task and args.sentiment_task:
+        combined_loss = e_reg * e_loss + s_reg * s_loss if args.emotion_task and args.sentiment_task else None
+
+    return combined_loss, e_loss, s_loss, preds_e, preds_s, e_logits, s_logits
+
+def train_one_epoch(args, epoch, model, dataloader, optimizers, criterions,
+                    emotion_reg=0.5, sentiment_reg=0.5, device='cuda'):
     model.train()
     softmax = nn.Softmax(dim=1)
 
@@ -128,7 +127,8 @@ def train_one_epoch(args, model, dataloader, optimizer, criterions,
         emotion_labels = emotion_labels.to(device)
         sentiment_labels = sentiment_labels.to(device)
 
-        optimizer.zero_grad()
+        optimizers[0].zero_grad()
+        optimizers[1].zero_grad()
 
         if args.use_audio and args.use_text:
             a, t = model(audio_arrays, texts)
@@ -152,10 +152,10 @@ def train_one_epoch(args, model, dataloader, optimizer, criterions,
                 e_reg=emotion_reg,
                 s_reg=sentiment_reg,
                 e_criterion=criterions['emotion'],
-                s_criterion=criterions['sentiment']
+                s_criterion=criterions['sentiment'],
             )
 
-            optimizer.zero_grad()
+            optimizers[0].zero_grad()
 
             if args.emotion_task and args.sentiment_task:
                 combined_audio_loss.backward()
@@ -164,7 +164,7 @@ def train_one_epoch(args, model, dataloader, optimizer, criterions,
             elif args.sentiment_task:
                 s_audio_loss.backward()
 
-            optimizer.step()
+            optimizers[0].step()
 
             if args.emotion_task and args.sentiment_task:
                 losses['combined_audio'] += combined_audio_loss.item() 
@@ -188,19 +188,21 @@ def train_one_epoch(args, model, dataloader, optimizer, criterions,
                 e_reg=emotion_reg,
                 s_reg=sentiment_reg,
                 e_criterion=criterions['emotion'],
-                s_criterion=criterions['sentiment']
+                s_criterion=criterions['sentiment'],
             )
 
-            optimizer.zero_grad()
+            optimizers[1].zero_grad()
 
-            if args.emotion_task and args.sentiment_task:
-                combined_text_loss.backward()
-            elif args.emotion_task:
-                e_text_loss.backward()
-            elif args.sentiment_task:
-                s_text_loss.backward()
+            if epoch % 1 == 0:
 
-            optimizer.step()
+                if args.emotion_task and args.sentiment_task:
+                    combined_text_loss.backward()
+                elif args.emotion_task:
+                    e_text_loss.backward()
+                elif args.sentiment_task:
+                    s_text_loss.backward()
+
+                optimizers[1].step()
 
             if args.emotion_task and args.sentiment_task:
                 losses['combined_text'] += combined_text_loss.item()
@@ -215,14 +217,14 @@ def train_one_epoch(args, model, dataloader, optimizer, criterions,
 
         if args.use_audio and args.use_text:
             if args.emotion_task:
-                e_logits = (audio_e_logits + text_e_logits) / 2
+                e_logits = audio_e_logits * 0.5 + text_e_logits * 0.5
                 e_loss = criterions['emotion'](e_logits, emotion_labels)
                 predictions_e = torch.argmax(softmax(e_logits), dim=1).detach().cpu().numpy()
                 losses['fused_emotion'] += e_loss.item()
                 metrics['emotion']['fused'].extend(predictions_e)
 
             if args.sentiment_task:
-                s_logits = (audio_s_logits + text_s_logits) / 2
+                s_logits = audio_s_logits * 0.5 + text_s_logits * 0.5
                 s_loss = criterions['sentiment'](s_logits, sentiment_labels)
                 predictions_s = torch.argmax(softmax(s_logits), dim=1).detach().cpu().numpy()
                 losses['fused_sentiment'] += s_loss.item()
@@ -269,7 +271,7 @@ def train_one_epoch(args, model, dataloader, optimizer, criterions,
         return losses, {'sentiment': sentiment_metrics}
 
 
-def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.7, sentiment_reg=0.3, device='cuda'):
+def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sentiment_reg=0.5, device='cuda'):
     model.eval()
     softmax = nn.Softmax(dim=1)
 
@@ -345,14 +347,14 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.7, sen
 
         if args.use_audio and args.use_text:
             if args.emotion_task:
-                e_logits = (audio_e_logits + text_e_logits) / 2
+                e_logits = audio_e_logits * 0.5 + text_e_logits * 0.5
                 e_loss = criterions['emotion'](e_logits, emotion_labels)
                 predictions_e = torch.argmax(softmax(e_logits), dim=1).detach().cpu().numpy()
                 losses['fused_emotion'] += e_loss.item()
                 metrics['emotion']['fused'].extend(predictions_e)
 
             if args.sentiment_task:
-                s_logits = (audio_s_logits + text_s_logits) / 2
+                s_logits = audio_s_logits * 0.5 + text_s_logits * 0.5
                 s_loss = criterions['sentiment'](s_logits, sentiment_labels)
                 predictions_s = torch.argmax(softmax(s_logits), dim=1).detach().cpu().numpy()
                 losses['fused_sentiment'] += s_loss.item()
@@ -397,7 +399,7 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.7, sen
     elif args.sentiment_task:
         return losses, {'sentiment': sentiment_metrics}
 
-def train_and_validate(args, model, train_loader, val_loader, optimizer, criterions, num_epochs, experiment_name, device='cuda', save_dir='./results'):
+def train_and_validate(args, model, train_loader, val_loader, optimizers, criterions, num_epochs, experiment_name, device='cuda', save_dir='./results'):
    
     os.makedirs(save_dir, exist_ok=True)
     
@@ -425,33 +427,159 @@ def train_and_validate(args, model, train_loader, val_loader, optimizer, criteri
     if args.sentiment_task:
         tasks.append('sentiment')
 
+    emotion_reg = 0.6
+    sentiment_reg = 0.4
+
+    best_f1_emotion = 0.0
+    best_weighted_acc_emotion = 0.0
+
+    best_f1_sentiment = 0.0
+    best_weighted_acc_sentiment = 0.0
+
+    best_model_state_dict = None
+
+    best_epoch = 0
+
     for epoch in range(num_epochs):
-        train_losses, train_metrics = train_one_epoch(args, model, train_loader, optimizer, criterions, device=device)
-        val_losses, val_metrics = validate_one_epoch(args, model, val_loader, criterions, device=device)
+        train_losses, train_metrics = train_one_epoch(args, epoch, model, train_loader, optimizers, criterions, emotion_reg=emotion_reg, sentiment_reg=sentiment_reg, device=device)
+        val_losses, val_metrics = validate_one_epoch(args, model, val_loader, criterions, emotion_reg=emotion_reg, sentiment_reg=sentiment_reg, device=device)
 
         print(f"Epoch [{epoch+1}/{num_epochs}]")
 
         for modality in modalities:
             print(f"\n\n ----- {modality.upper()} -----")
             for task in tasks:
-                print(f"\txxxxx {task.upper()} xxxxx:")
+                print(f"\n\txxxxx {task.upper()} xxxxx:")
                 print(f"\tTrain Loss: {train_losses[f'{modality}_{task}']:.4f} | Val Loss: {val_losses[f'{modality}_{task}']:.4f}\n")
                 print(f"\tTrain Balanced Acc: {train_metrics[task][modality]['balanced_acc']:.4f} | Val Balanced Acc: {val_metrics[task][modality]['balanced_acc']:.4f}")
-                print(f"\tTrain Macro F1: {train_metrics[task][modality]['macro_f1']:.4f} | Val Macro F1: {val_metrics[task][modality]['macro_f1']:.4f}")
+                print(f"\tTrain Weighted F1: {train_metrics[task][modality]['weighted_f1']:.4f} | Val Weighted F1: {val_metrics[task][modality]['weighted_f1']:.4f}")
+                if args.use_audio and args.use_text:
+                    mod = 'fused'
+                elif args.use_audio:
+                    mod = 'audio'
+                elif args.use_text:
+                    mod = 'text'
+                if modality == mod:
+                    if task == 'emotion':
+                        if val_metrics['emotion'][mod]['weighted_f1'] > best_f1_emotion:
+                            best_f1_emotion = val_metrics['emotion'][mod]['weighted_f1']
+                            best_weighted_acc_sentiment = val_metrics['sentiment'][mod]['balanced_acc']
+                            results['model_state_dict'] = model.state_dict()
+                            best_weighted_acc_emotion = val_metrics['emotion'][mod]['balanced_acc']
+                            best_f1_sentiment = val_metrics['sentiment'][mod]['weighted_f1']
+                            best_epoch = epoch
+                            best_model_state_dict = model.state_dict()
 
-        print("---------------------------------------------------------------\n")
+
+        model.load_state_dict(best_model_state_dict)
+
+        print("\n\nBest Epoch:", best_epoch)
+        print("Best F1 Emotion:", best_f1_emotion)
+        print("Best Weighted Acc Emotion:", best_weighted_acc_emotion)
+        print("Best F1 Sentiment:", best_f1_sentiment)
+        print("Best Weighted Acc Sentiment:", best_weighted_acc_sentiment)
+
+        print("\n---------------------------------------------------------------\n\n")
 
     return model, results
 
-def test_inference(model, test_loader, dataset, criterions, save_path, device='cuda'):
-    pass
+def test_inference(args, model, test_loader, criterions, experiment_name, device='cuda', emotion_reg=0.6, sentiment_reg=0.4):
+    """
+    Perform inference on the test set and save the true and predicted labels to a file.
+
+    :param model: The trained model.
+    :param test_loader: DataLoader for the test set (the embedding one)
+    :param criterions: Dictionary of loss functions for each task.
+    :param save_path: Path to save the true and predicted labels.
+    :param device: Device to use for inference ('cuda' or 'cpu').
+    """
+    model.eval()
+
+    softmax = nn.Softmax(dim=1)
+
+    true_and_pred_labels = {
+        'emotion': {'true': [], 'pred': []},
+        'sentiment': {'true': [], 'pred': []},
+    }
+
+    with torch.no_grad():
+        for audio_arrays, texts, emotion_labels, sentiment_labels in test_loader:
+
+            audio_arrays = audio_arrays.to(device)
+            emotion_labels = emotion_labels.to(device)
+            sentiment_labels = sentiment_labels.to(device)
+
+            true_and_pred_labels['emotion']['true'].extend(emotion_labels.cpu().numpy())
+            true_and_pred_labels['sentiment']['true'].extend(sentiment_labels.cpu().numpy())
+
+            if args.use_audio and args.use_text:
+                a, t = model(audio_arrays, texts)
+            elif args.use_audio:
+                a = model.audio_encoder(audio_arrays.unsqueeze(1))
+                a = F.adaptive_avg_pool2d(a, 1)
+                a = torch.flatten(a, 1)
+            elif args.use_text:
+                t = model.text_encoder(texts)
+
+        # ---------------------------- AUDIO MODALITY VALIDATION ----------------------------
+
+            if args.use_audio:
+
+                combined_audio_loss, e_audio_loss, s_audio_loss, audio_e_pred, audio_s_pred, audio_e_logits, audio_s_logits = process_task(
+                    args,
+                    model=model, 
+                    m=a, 
+                    e_labels=emotion_labels,
+                    s_labels=sentiment_labels,
+                    e_reg=emotion_reg,
+                    s_reg=sentiment_reg,
+                    e_criterion=criterions['emotion'],
+                    s_criterion=criterions['sentiment']
+                )
+
+        # ---------------------------- TEXT MODALITY VALIDATION ----------------------------
+
+            if args.use_text:
+
+                combined_text_loss, e_text_loss, s_text_loss, text_e_pred, text_s_pred, text_e_logits, text_s_logits = process_task(
+                    args,
+                    model=model, 
+                    m=t, 
+                    e_labels=emotion_labels,
+                    s_labels=sentiment_labels,
+                    e_reg=emotion_reg,
+                    s_reg=sentiment_reg,
+                    e_criterion=criterions['emotion'],
+                    s_criterion=criterions['sentiment']
+                )
+
+        # ---------------------------- MODALITY FUSION ----------------------------
+
+            if args.use_audio and args.use_text:
+                if args.emotion_task:
+                    e_logits = audio_e_logits * 0.5 + text_e_logits * 0.5
+                    e_loss = criterions['emotion'](e_logits, emotion_labels)
+                    predictions_e = torch.argmax(softmax(e_logits), dim=1).detach().cpu().numpy()
+                    true_and_pred_labels['emotion']['pred'].extend(predictions_e)
+
+                if args.sentiment_task:
+                    s_logits = audio_s_logits * 0.5 + text_s_logits * 0.5
+                    s_loss = criterions['sentiment'](s_logits, sentiment_labels)
+                    predictions_s = torch.argmax(softmax(s_logits), dim=1).detach().cpu().numpy()
+                    true_and_pred_labels['sentiment']['pred'].extend(predictions_s)
+            elif args.use_audio:
+                if args.emotion_task:
+                    predictions_e = torch.argmax(softmax(audio_e_logits), dim=1).detach().cpu().numpy()
+                    true_and_pred_labels['emotion']['pred'].extend(predictions_e)
+                if args.sentiment_task:
+                    predictions_s = torch.argmax(softmax(audio_s_logits), dim=1).detach().cpu().numpy()
+                    true_and_pred_labels['sentiment']['pred'].extend(predictions_s)
+
+    return true_and_pred_labels
 
 def main():
 
     args = get_arguments()
-
-    #warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
-    #warnings.filterwarnings("ignore", category=UserWarning, module="torch")
 
     device = 'cuda'
 
@@ -474,61 +602,105 @@ def main():
     print("Data loaders created.")
 
     audio_model_name = "facebook/wav2vec2-base"
-    text_model_name = "bert-base-uncased"
+    text_model_name = "roberta-base"
 
-    emotion_class_weights = compute_emotion_class_weights(train_set, device)
-    print("Computed class weights on device:", emotion_class_weights)
+    #get weights for balancing classes
+
+    class_counts = train_set.emotion_class_counts
+    total_samples = 0
+    for key in class_counts:
+        total_samples += class_counts[key]
+
+    print("Total samples:", total_samples)
+
+    emotion_class_weights = torch.zeros(len(class_counts))
+    for i in range(len(class_counts)):
+        emotion_class_weights[i] = class_counts[i] / total_samples
+
+    #invert the weights
+    emotion_class_weights = 1 / emotion_class_weights
+
+    #normalize the weights
+    emotion_class_weights = emotion_class_weights / emotion_class_weights.sum()
+
+    emotion_class_weights = emotion_class_weights.to(device)
+
+    print("Class weights:", emotion_class_weights)
 
     lr = args.lr
 
     criterions = {
-        #'emotion': nn.CrossEntropyLoss(weight=emotion_class_weights),
-        'emotion': nn.CrossEntropyLoss(),
+        'emotion': nn.CrossEntropyLoss(weight=emotion_class_weights),
         'sentiment': nn.CrossEntropyLoss()
     }
 
     num_epochs = args.epochs
-    num_emotions = len(train_set.get_emotions_dicts()[0].values())
-    num_sentiments = len(train_set.get_sentiments_dicts()[0].values())
+    num_emotions = len(train_set.emotion_class_counts)
+    num_sentiments = len(train_set.sentiment_class_counts)
 
     model = MultimodalClassifier(
         fusion_dim=768,
+        alternating=True,
         text_fine_tune=True,
         #audio_fine_tune=True,
         #unfreeze_last_n_audio=2,
-        unfreeze_last_n_text=2,
+        unfreeze_last_n_text=1,
         audio_encoder=resnet18(modality='audio'),
         num_emotions=num_emotions,
         num_sentiments=num_sentiments
     ).to(device)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0001)
-    experiment_name = 'TEST'
+    lr1 = 0.0001
+    lr2 = 0.00001
+    optimizer1 = torch.optim.SGD(model.parameters(), lr=lr1, weight_decay=0.0001, momentum=0.99)
+    optimizer2 = torch.optim.AdamW(model.parameters(), lr=lr2, weight_decay=0.0001)
+    
+    optimizers = [optimizer1, optimizer2]
+
+    experiment_name = 'only_text'
 
     print("Training model...")
 
-    model, results = train_and_validate(args,
+    best_model, results = train_and_validate(args,
         model, train_loader, dev_loader, 
-        optimizer, criterions, num_epochs, 
+        optimizers, criterions, num_epochs, 
         experiment_name=experiment_name, 
         device='cuda', save_dir='./saved_results'
     )
     
     print("Training complete.")
 
+    true_and_pred_labels = test_inference(args, best_model, test_loader, criterions, experiment_name)
 
-    #plot_metrics(loaded_results, metric='macro_f1', modality='fused', task='emotions')
-    #true_and_pred_labels = test_inference(model, test_emb_loader, test_set, criterions, save_path='/kaggle/working')
+    save_path = os.path.join(f"images/{experiment_name}")
+
+    unique_emotion_classes = []
+    unique_sentiment_classes = []
+
+    for key in train_set.emotion_class_counts:
+        unique_emotion_classes.append(train_set.emotion_to_str(key))
+
+    for key in train_set.sentiment_class_counts:
+        unique_sentiment_classes.append(train_set.sentiment_to_str(key))
 
 
-    # for mode in ['confusion_matrix', 'classification_report', 'roc_curve']:
-    # analyze_results_per_class(
-    #     true_and_pred_labels['emotion']['true'], 
-    #     true_and_pred_labels['emotion']['pred'], 
-    #     unique_classes,
-    #     task_name="Emotions",
-    #     mode=mode
-    # )
+    for mode in ['confusion_matrix', 'classification_report']:
+        analyze_results_per_class(
+            true_and_pred_labels['emotion']['true'], 
+            true_and_pred_labels['emotion']['pred'], 
+            unique_emotion_classes,
+            task_name="Emotions",
+            mode=mode,
+            save_path=save_path
+        )
+        analyze_results_per_class(
+            true_and_pred_labels['sentiment']['true'], 
+            true_and_pred_labels['sentiment']['pred'], 
+            unique_sentiment_classes,
+            task_name="Sentiments",
+            mode=mode,
+            save_path=save_path
+        )
 
 if __name__ == "__main__":
     main()

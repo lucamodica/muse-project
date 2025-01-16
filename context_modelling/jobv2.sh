@@ -19,6 +19,6 @@ ml load Transformers/4.39.3-gfbf-2023a
 ml load matplotlib/3.7.2-gfbf-2023a
 ml load Seaborn/0.13.2-gfbf-2023a
 
-source my_venv/bin/activate
+source ../my_venv/bin/activate
 
-python muse-modality-alternating.py --lr 0.0001 --use_audio --sentiment_task --emotion_task --epochs 50
+python mainv2.py --lr 0.0001 --epochs 15

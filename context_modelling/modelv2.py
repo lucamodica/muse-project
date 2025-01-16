@@ -1,8 +1,8 @@
 import torch
-import torch.nn as nn
-from transformers import AutoTokenizer, AutoModel, AutoProcessor, BertTokenizer, DistilBertModel, DistilBertTokenizer, RobertaTokenizer, RobertaModel
+from transformers import AutoModel, AutoTokenizer, AutoProcessor
+from torch import nn
 from torch.functional import F
-
+from transformers import RobertaTokenizer, RobertaModel
 
 class AudioEncoder(nn.Module):
     def __init__(self, model_name, preprocessing=True, fine_tune=False, unfreeze_last_n_layers=2):
@@ -125,10 +125,10 @@ class TextEncoder(nn.Module):
         super(TextEncoder, self).__init__()
         
         # Switch to RobertaTokenizer
-        self.tokenizer = RobertaTokenizer.from_pretrained(model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         
         # Switch to RobertaModel
-        self.model = RobertaModel.from_pretrained(model_name).to(device)
+        self.model = AutoModel.from_pretrained(model_name).to(device)
 
         # Freeze all parameters first.
         for param in self.model.parameters():
@@ -177,7 +177,7 @@ class TextEncoder(nn.Module):
         # Typically we use the [CLS] token embedding as a single representation
         cls_emb = outputs.last_hidden_state[:, 0, :]  # shape [B, hidden_dim]
         return cls_emb
-
+    
 class FusionLSTM(nn.Module):
     def __init__(self, input_dim, hidden_dim=256, num_layers=1, bidirectional=False, dropout=0.1):
         super(FusionLSTM, self).__init__()
@@ -214,13 +214,14 @@ class MultimodalClassifierWithLSTM(nn.Module):
     
     def forward(self, audio_dialog_utts, text_dialog_utts, alternating=False):
        
-        audio_emb = self.audio_encoder(audio_dialog_utts)
-        audio_emb = F.adaptive_avg_pool2d(audio_emb, 1)
-        audio_emb = torch.flatten(audio_emb, 1)
+        audio_emb = [self.audio_encoder(utt) for utt in audio_dialog_utts]
+        audio_emb = torch.stack(audio_emb)
 
         text_emb = [self.text_encoder(utt) for utt in text_dialog_utts]
-        text_emb = torch.stack(text_emb)
+        text_emb = torch.stack(text_emb)  # shape (B, hidden_dim)
 
+        # remove the previous single batch dimension
+        audio_emb = audio_emb.squeeze(1)
         text_emb = text_emb.squeeze(1)
 
         if self.alternating:
@@ -232,24 +233,23 @@ class MultimodalClassifierWithLSTM(nn.Module):
             padded_audio_emb = F.pad(audio_emb, (0, 0, 0, self.max_utt - audio_emb.size(1)))
             padded_text_emb = F.pad(text_emb, (0, 0, 0, self.max_utt - text_emb.size(1)))
 
-            # audio_lstm_out, (audio_hn, audio_cn) = self.audio_lstm(padded_audio_emb)
-            # text_lstm_out, (text_hn, text_cn) = self.text_lstm(padded_text_emb)
+            audio_lstm_out, (audio_hn, audio_cn) = self.audio_lstm(padded_audio_emb)
+            text_lstm_out, (text_hn, text_cn) = self.text_lstm(padded_text_emb)
 
-            # audio_lstm_out = audio_lstm_out.squeeze(0)
-            # text_lstm_out = text_lstm_out.squeeze(0)
+            audio_lstm_out = audio_lstm_out.squeeze(0)
+            text_lstm_out = text_lstm_out.squeeze(0)
 
-            # audio_emotion_logits = self.emotion_head(audio_lstm_out)
-            # audio_sentiment_logits = self.sentiment_head(audio_lstm_out)
+            audio_emotion_logits = self.emotion_head(audio_lstm_out)
+            audio_sentiment_logits = self.sentiment_head(audio_lstm_out)
 
-            # text_emotion_logits = self.emotion_head(text_lstm_out)
-            # text_sentiment_logits = self.sentiment_head(text_lstm_out)
+            text_emotion_logits = self.emotion_head(text_lstm_out)
+            text_sentiment_logits = self.sentiment_head(text_lstm_out)
 
-            return padded_audio_emb, padded_text_emb
+            return audio_emotion_logits, audio_sentiment_logits, text_emotion_logits, text_sentiment_logits
         
         # Combine
         fused_emb = torch.cat([audio_emb, text_emb], dim=-1)  # (utts, audio_enc_dim + text_enc_dim)
 
-        
         # Reshape back to (B, S, fused_dim) for the LSTM
         fused_emb = fused_emb.unsqueeze(0)  # (1, utts, audio_enc_dim + text_enc_dim)
 

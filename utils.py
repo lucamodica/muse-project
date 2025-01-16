@@ -18,12 +18,12 @@ def compute_metrics(true_labels, predictions):
     )
     
     per_class_f1 = {label: round(values["f1-score"], 3) for label, values in report.items() if label.isdigit()}
-    macro_f1 = round(report["macro avg"]["f1-score"], 3)
+    weighted_f1 = round(report["weighted avg"]["f1-score"], 3)
 
     # Compile metrics into a dictionary
     metrics = {
         "balanced_acc": round(b_accuracy, 3),
-        "macro_f1": macro_f1,
+        "weighted_f1": weighted_f1,
         "per_class_f1": per_class_f1
     }
 
@@ -86,7 +86,7 @@ def plot_metrics(results, task='emotions', metric='acc', modality='fused'):
     plt.grid(True)
     plt.show()
 
-def analyze_results_per_class(true_labels, predicted_labels, class_names, task_name="Sentiment", mode="confusion_matrix"):
+def analyze_results_per_class(true_labels, predicted_labels, class_names, task_name="Sentiment", mode="confusion_matrix", save_path="./images"):
     """
     Analyze results per class with confusion matrix, classification report, or ROC curves.
 
@@ -98,6 +98,9 @@ def analyze_results_per_class(true_labels, predicted_labels, class_names, task_n
         mode (str): The type of analysis. Options: "confusion_matrix", "classification_report", "roc_curve".
     """
     os.makedirs('images', exist_ok=True)
+
+    save_path = os.path.join(save_path, task_name)
+    os.makedirs(save_path, exist_ok=True)
     
     if mode == "confusion_matrix":
         # Plot confusion matrix
@@ -109,13 +112,15 @@ def analyze_results_per_class(true_labels, predicted_labels, class_names, task_n
         plt.ylabel("True")
         plt.xticks(rotation=45)
         plt.yticks(rotation=45)
-        plt.savefig(f'images/alternating/{task_name}_confusion_matrix.png')
+
+        plt.savefig(f'{save_path}/confusion_matrix.png')
         plt.close()
 
     elif mode == "classification_report":
         # Print classification report
         report = classification_report(true_labels, predicted_labels, target_names=class_names, zero_division=0)
-        with open(f'images/alternating/{task_name}_classification_report.txt', 'w') as f:
+        open_path = os.path.join(save_path, "classification_report.txt")
+        with open(open_path, 'w') as f:
             f.write(f"Classification Report for {task_name}:\n\n")
             f.write(report)
 

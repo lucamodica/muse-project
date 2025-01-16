@@ -98,10 +98,6 @@ class ResNet(nn.Module):
                                        dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2,
                                        dilate=replace_stride_with_dilation[2])
-        # if self.pool == 'avgpool':
-        #     self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
-        #
-        #     self.fc = nn.Linear(512 * block.expansion, num_classes)  # 8192
 
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
@@ -110,9 +106,6 @@ class ResNet(nn.Module):
                 nn.init.normal_(m.weight, mean=1, std=0.02)
                 nn.init.constant_(m.bias, 0)
 
-        # Zero-initialize the last BN in each residual branch,
-        # so that the residual branch starts with zeros, and each residual block behaves like an identity.
-        # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
         if zero_init_residual:
             for m in self.modules():
                 if isinstance(m, Bottleneck):
@@ -161,7 +154,7 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        x = self.out_conv(x)  # Now x has shape [B, 768, H_out, W_out]
+        #x = self.out_conv(x)  # Now x has shape [B, 768, H_out, W_out]
 
         out = x
 

@@ -21,4 +21,4 @@ ml load Seaborn/0.13.2-gfbf-2023a
 
 source ../my_venv/bin/activate
 
-python main.py --lr 0.0001 --epochs 50
+python main.py --lr 0.0001 --epochs 15

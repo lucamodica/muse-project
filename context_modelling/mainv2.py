@@ -1,6 +1,3 @@
-
-
-
 import tarfile
 import os
 from torch.utils.data import Dataset
@@ -11,8 +8,7 @@ import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BertTokenizer, BertModel, Wav2Vec2Processor, Wav2Vec2Model
-from sklearn.metrics import classification_report, f1_score, balanced_accuracy_score
+from transformers import AutoTokenizer, AutoModel, AutoConfig, AutoProcessor
 import joblib
 from pprint import pprint
 import torch
@@ -21,18 +17,16 @@ from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Subset
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
 from sklearn.preprocessing import label_binarize
 from tqdm import tqdm
 import warnings
 from tabulate import tabulate
 from pprint import pprint
-
 from backbone import resnet18
-
 from utils import plot_metrics, analyze_results_per_class, compute_metrics, task_result_to_table, flatten_metrics, compute_emotion_class_weights
-from dataset import MELDConversationDataset, meld_collate_fn
-from model import MultimodalClassifierWithLSTM, TextEncoder, AudioEncoder, FusionLSTM
+
+from datasetv2 import MELDConversationDataset, meld_collate_fn, AudioTransformPipeline
+from modelv2 import MultimodalClassifierWithLSTM, TextEncoder, AudioEncoder, FusionLSTM
 
 import argparse
 
@@ -83,10 +77,10 @@ def train_one_epoch(args, model, dataloader, optimizers, criterions, emotion_reg
         batch_combined_loss = 0.0 # what is optimized
 
         for b_idx in range(len(batch["dialog_ids"])):
-            fbank_list      = batch["fbank_lists"][b_idx]       
-            text_list       = batch["text_lists"][b_idx]        
-            emotion_list    = batch["emotion_lists"][b_idx]
-            sentiment_list  = batch["sentiment_lists"][b_idx]
+            fbank_list      = batch["audio_list"][b_idx]       
+            text_list       = batch["text_list"][b_idx]        
+            emotion_list    = batch["emotion_list"][b_idx]
+            sentiment_list  = batch["sentiment_list"][b_idx]
 
             batch_emotion_labels.extend(emotion_list)
             batch_sentiment_labels.extend(sentiment_list)
@@ -186,10 +180,10 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
 
             # Process each conversation in the batch
             for b_idx in range(len(batch["dialog_ids"])):
-                fbank_list      = batch["fbank_lists"][b_idx]
-                text_list       = batch["text_lists"][b_idx]
-                emotion_list    = batch["emotion_lists"][b_idx]
-                sentiment_list  = batch["sentiment_lists"][b_idx]
+                fbank_list      = batch["audio_list"][b_idx]
+                text_list       = batch["text_list"][b_idx]
+                emotion_list    = batch["emotion_list"][b_idx]
+                sentiment_list  = batch["sentiment_list"][b_idx]
 
                 # Extend local label lists with current sample's labels
                 batch_emotion_labels.extend(emotion_list)
@@ -247,7 +241,7 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
     return losses, {
         'emotion': {'fused': fused_emotion_metrics},
         'sentiment': {'fused': fused_sentiment_metrics}
-    }        
+    } 
 
 def train_and_validate(args, model, train_loader, val_loader, optimizers, criterions, num_epochs, experiment_name, device='cuda', save_dir='./results'):
     """
@@ -278,8 +272,6 @@ def train_and_validate(args, model, train_loader, val_loader, optimizers, criter
     best_sentiment_weighted_acc = 0.0
     best_model_state = None
 
-    tasks = ['emotion', 'sentiment']
-
 
     modalities = ['fused']
 
@@ -289,10 +281,9 @@ def train_and_validate(args, model, train_loader, val_loader, optimizers, criter
         val_losses, val_metrics = validate_one_epoch(args, model, val_loader, criterions, device=device)
 
         print(f"Epoch [{epoch+1}/{num_epochs}]")
-        for task in tasks:
-            new_task = f"fused_{task}"
-            print(f"\t{task.capitalize()} Train Loss: {train_losses[new_task]:.4f}")
-            print(f"\t{task.capitalize()} Val Loss:   {val_losses[new_task]:.4f}")
+        for task in ['emotion', 'sentiment']:
+            print(f"\t{task.capitalize()} Train Loss: {train_losses[task]:.4f}")
+            print(f"\t{task.capitalize()} Val Loss:   {val_losses[task]:.4f}")
             for modality in modalities:
                 train_acc = train_metrics[task][modality]['balanced_acc'] * 100
                 val_acc = val_metrics[task][modality]['balanced_acc'] * 100
@@ -301,13 +292,15 @@ def train_and_validate(args, model, train_loader, val_loader, optimizers, criter
                 print(f"\t\t{modality.capitalize()} Train Balanced Acc: {train_acc:.2f}%, Train F1 (weighted): {train_f1:.2f}%")
                 print(f"\t\t{modality.capitalize()} Val Balanced Acc:   {val_acc:.2f}%, Val F1 (weighted):   {val_f1:.2f}%")
                 print('\n')
-        if val_metrics['emotion']['fused']['weighted_f1'] > best_emotion_f1:
-            best_emotion_f1 = val_metrics['emotion']['fused']['weighted_f1']
-            best_emotion_weighted_acc = val_metrics['emotion']['fused']['balanced_acc']
-            best_sentiment_f1 = val_metrics['sentiment']['fused']['weighted_f1']
-            best_sentiment_weighted_acc = val_metrics['sentiment']['fused']['balanced_acc']
-            best_epoch = epoch
-            best_model_state = model.state_dict()
+
+            if task == 'emotion' and modality == 'fused' and val_metrics[task]['fused']['weighted_f1'] > best_emotion_f1:
+                best_emotion_f1 = val_metrics[task]['fused']['weighted_f1']
+                best_emotion_weighted_acc = val_metrics[task]['fused']['balanced_acc']
+                best_sentiment_f1 = val_metrics['sentiment']['fused']['weighted_f1']
+                best_sentiment_weighted_acc = val_metrics['sentiment']['fused']['balanced_acc']
+                best_epoch = epoch
+                #save model copy in best model
+                best_model_state = model.state_dict()
 
         print("\n\nBest epoch so far:", best_epoch)
         print("\nEMOTION:")
@@ -345,10 +338,10 @@ def test_inference(args, model, test_loader, criterions, experiment_name, device
     with torch.no_grad():
         for batch in test_loader:
             for b_idx in range(len(batch["dialog_ids"])):
-                fbank_list      = batch["fbank_lists"][b_idx]
-                text_list       = batch["text_lists"][b_idx]
-                emotion_list    = batch["emotion_lists"][b_idx]
-                sentiment_list  = batch["sentiment_lists"][b_idx]
+                fbank_list      = batch["audio_list"][b_idx]
+                text_list       = batch["text_list"][b_idx]
+                emotion_list    = batch["emotion_list"][b_idx]
+                sentiment_list  = batch["sentiment_list"][b_idx]
 
                 actual_len = len(emotion_list)
 
@@ -381,19 +374,39 @@ def test_inference(args, model, test_loader, criterions, experiment_name, device
 def main():
     args = get_arguments()
 
-    device = 'cuda'
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    text_encoder_name = 'roberta-base'
+    audio_encoder_name = 'openai/whisper-medium'
+    
+    audio_processor = AutoProcessor.from_pretrained(audio_encoder_name)
+    audio_transform = AudioTransformPipeline()
 
     print("Loading data...")
 
-    train_set = MELDConversationDataset(csv_file="train_sent_emo.csv", root_dir="../meld-train-muse", mode="train")
-    dev_set = MELDConversationDataset(csv_file="dev_sent_emo.csv", root_dir="../meld-dev-muse", mode="dev")
-    test_set = MELDConversationDataset(csv_file='test_sent_emo.csv', root_dir='../meld-test-muse', mode='test')
+    train_set = MELDConversationDataset(
+      csv_file="train_sent_emo.csv", 
+      root_dir="../meld-train-muse",
+      audio_transform=audio_transform,
+      audio_processor=audio_processor
+    )
+    dev_set = MELDConversationDataset(
+      csv_file="dev_sent_emo.csv", 
+      root_dir="../meld-dev-muse",
+      audio_transform=audio_transform,
+      audio_processor=audio_processor
+    )
+    test_set = MELDConversationDataset(
+      csv_file='test_sent_emo.csv', 
+      root_dir='../meld-test-muse',
+      audio_transform=audio_transform,
+      audio_processor=audio_processor
+    )
     
     print("Data loaded.")
 
-    train_loader = DataLoader(train_set, batch_size=8, shuffle=True, num_workers=16, collate_fn=meld_collate_fn)
-    dev_loader = DataLoader(dev_set, batch_size=8, shuffle=True, num_workers=16, collate_fn=meld_collate_fn)
-    test_loader = DataLoader(test_set, batch_size=8, shuffle=True, num_workers=16, collate_fn=meld_collate_fn)
+    train_loader = DataLoader(train_set, batch_size=4, shuffle=True, num_workers=4, collate_fn=meld_collate_fn)
+    dev_loader = DataLoader(dev_set, batch_size=4, shuffle=True, num_workers=4, collate_fn=meld_collate_fn)
+    test_loader = DataLoader(test_set, batch_size=4, shuffle=True, num_workers=4, collate_fn=meld_collate_fn)
 
     print("Data loaders created.")
 
@@ -448,10 +461,13 @@ def main():
 
     print("Max utterance size:", max_utt)
 
+    audio_encoder = AudioEncoder(model_name=audio_encoder_name, preprocessing=False)
+    text_encoder = TextEncoder(model_name=text_encoder_name, fine_tune=True, unfreeze_last_n_layers=1)
+
     model = MultimodalClassifierWithLSTM(
         fusion_lstm=FusionLSTM(input_dim=1280, hidden_dim=256, num_layers=1, bidirectional=True, dropout=0.2),
-        audio_encoder=resnet18(modality='audio'),
-        text_encoder=TextEncoder(fine_tune=True, unfreeze_last_n_layers=1),
+        audio_encoder=audio_encoder,
+        text_encoder=text_encoder,
         hidden_dim=256,
         num_emotions=num_emotions,
         num_sentiments=num_sentiments,
@@ -459,16 +475,15 @@ def main():
         alternating=False
     ).to(device)
 
-    optimizers = []
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0001)
     optimizers = [optimizer]
 
-    experiment_name = 'new_alternating_biLSTM_resnet18_roberta_AdamW_0001_SGD_0001_momentum_099'
+
+    experiment_name = 'pre-trained-shennanigans'
 
     print("Training model...")
 
-    best_model, results = train_and_validate(args,
+    model, results = train_and_validate(args,
         model, train_loader, dev_loader, 
         optimizers, criterions, num_epochs, 
         experiment_name=experiment_name, 

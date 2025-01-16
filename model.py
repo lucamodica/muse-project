@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, AutoModel, AutoProcessor, BertTokenizer, DistilBertModel, DistilBertTokenizer
+from transformers import AutoTokenizer, AutoModel, AutoProcessor, BertTokenizer, DistilBertModel, DistilBertTokenizer, RobertaTokenizer, RobertaModel
 from torch.functional import F
 
 
@@ -56,30 +56,31 @@ class AudioEncoder(nn.Module):
 
 class TextEncoder(nn.Module):
     """
-    Encodes text using a pretrained BERT model from Hugging Face.
+    Encodes text using a pretrained RoBERTa model from Hugging Face.
     """
 
     def __init__(self,
-                 model_name="distilbert-base-uncased",
+                 model_name="roberta-base",
                  fine_tune=False,
                  unfreeze_last_n_layers=2,
                  device='cuda'):
         super(TextEncoder, self).__init__()
-        # self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.tokenizer = DistilBertTokenizer.from_pretrained(model_name)
-        self.model = AutoModel.from_pretrained(model_name).to(device)
+        
+        # Switch to RobertaTokenizer
+        self.tokenizer = RobertaTokenizer.from_pretrained(model_name)
+        
+        # Switch to RobertaModel
+        self.model = RobertaModel.from_pretrained(model_name).to(device)
 
-        # If we're not fine-tuning at all, freeze everything.
-        # Otherwise, freeze everything first, then selectively unfreeze layers.
+        # Freeze all parameters first.
         for param in self.model.parameters():
             param.requires_grad = False
 
+        # If we want to fine-tune some layers, selectively unfreeze.
         if fine_tune and unfreeze_last_n_layers > 0:
-            # For BERT-base, there are 12 encoder layers: encoder.layer[0] ... encoder.layer[11].
-            # Unfreeze the last N layers:
-            total_layers = len(self.model.transformer.layer)
+            total_layers = len(self.model.encoder.layer)  # RoBERTa also has 12 layers
             for layer_idx in range(total_layers - unfreeze_last_n_layers, total_layers):
-                for param in self.model.transformer.layer[layer_idx].parameters():
+                for param in self.model.encoder.layer[layer_idx].parameters():
                     param.requires_grad = True
 
             # Optionally unfreeze the pooler layer if you use it
@@ -122,8 +123,9 @@ class TextEncoder(nn.Module):
 class MultimodalClassifier(nn.Module):
     def __init__(self,
                  fusion_dim=1536, 
+                 alternating=False,
                  audio_model_name="facebook/wav2vec2-base",
-                 text_model_name="distilbert-base-uncased",
+                 text_model_name="roberta-base",
                  audio_fine_tune=False,
                  text_fine_tune=False,
                  unfreeze_last_n_audio=2,
@@ -148,8 +150,11 @@ class MultimodalClassifier(nn.Module):
         # If Wav2Vec2 base has 768 dims and BERT base has 768 dims -> total is 1536
         # If you use average pooling / CLS, that might remain 768 for each
 
-        self.e_shared_classifier = nn.Linear(fusion_dim, num_emotions)
-        self.s_shared_classifier = nn.Linear(fusion_dim, num_sentiments)
+        #self.e_shared_classifier = nn.Linear(fusion_dim, num_emotions)
+        #self.s_shared_classifier = nn.Linear(fusion_dim, num_sentiments)
+
+        self.emotion_classifier = nn.Linear(fusion_dim, num_emotions)
+        self.sentiment_classifier = nn.Linear(fusion_dim, num_sentiments)
 
     def forward(self, audio_array, text):
         """
