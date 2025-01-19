@@ -25,7 +25,7 @@ class BasicBlock(nn.Module):
         self.conv1 = conv3x3(inplanes, planes, stride)
         self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU(inplace=True)
-        self.dropout = nn.Dropout(p=dropout_p)  # Dropout layer added
+        self.dropout = nn.Dropout(p=dropout_p)  
         self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
@@ -37,7 +37,7 @@ class BasicBlock(nn.Module):
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
-        out = self.dropout(out)  # apply dropout after first ReLU
+        out = self.dropout(out)  
 
         out = self.conv2(out)
         out = self.bn2(out)
@@ -47,7 +47,7 @@ class BasicBlock(nn.Module):
 
         out += identity
         out = self.relu(out)
-        out = self.dropout(out)  # apply dropout after second ReLU
+        out = self.dropout(out)  
 
         return out
 
@@ -68,8 +68,8 @@ class ResNet(nn.Module):
         self.inplanes = 64
         self.dilation = 1
         if replace_stride_with_dilation is None:
-            # each element in the tuple indicates if we should replace
-            # the 2x2 stride with a dilated convolution instead
+            
+            
             replace_stride_with_dilation = [False, False, False]
         if len(replace_stride_with_dilation) != 3:
             raise ValueError("replace_stride_with_dilation should be None "
@@ -154,7 +154,7 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        #x = self.out_conv(x)  # Now x has shape [B, 768, H_out, W_out]
+        
 
         out = x
 
@@ -170,7 +170,7 @@ class Bottleneck(nn.Module):
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 64.)) * groups
-        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        
         self.conv1 = conv1x1(inplanes, width)
         self.bn1 = norm_layer(width)
         self.conv2 = conv3x3(width, width, stride, groups, dilation)

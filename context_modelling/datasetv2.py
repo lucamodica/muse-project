@@ -28,32 +28,32 @@ class MELDConversationDataset(Dataset):
         """
         df = pd.read_csv(f'{root_dir}/{csv_file}')
 
-        # Order the dataframe rows by Dialogue_ID and Utterance_ID
+        
         df = df.sort_values(by=['Dialogue_ID', 'Utterance_ID'])
 
-        # Class counts for emotions and sentiments
+        
         self.emotion_class_counts = {i: 0 for i in range(7)}
         self.sentiment_class_counts = {i: 0 for i in range(3)}
         self.max_utterance_size = 0
 
-        self.dialogues = {}  # key: dialogue_id, value: list of utterance dicts
+        self.dialogues = {}  
         self.audio_transform = audio_transform
         self.text_transform = text_transform
-        self.target_length = target_length # not used for now
+        self.target_length = target_length 
         self.audio_processor = audio_processor
         self.sampling_rate = sampling_rate
         
         prev_dia_id = None
         utt_count = 0
 
-        # Prepare tasks for parallel processing
+        
         tasks = []
 
         for _, row in df.iterrows():
             dia_id = row["Dialogue_ID"]
             utt_id = row["Utterance_ID"]
 
-            # Update max dialogue size
+            
             if prev_dia_id == dia_id:
                 utt_count += 1
             else:
@@ -61,25 +61,25 @@ class MELDConversationDataset(Dataset):
                     self.max_utterance_size = utt_count
                 utt_count = 1
 
-            # Get audio file path
+            
             audio_file = f'{root_dir}/audio/dia{dia_id}_utt{utt_id}.wav'
 
-            # Add task to process audio and metadata
+            
             tasks.append((dia_id, utt_id, audio_file, row))
             prev_dia_id = dia_id
 
-        # Process tasks in parallel
-        # Process tasks in parallel using torch.multiprocessing
+        
+        
         with mp.Pool(processes=mp.cpu_count()) as pool:
             results = pool.map(self.process_utterance, tasks)
 
-        # Organize processed data into dialogues
+        
         for dia_id, utt_data in results:
             if dia_id not in self.dialogues:
                 self.dialogues[dia_id] = []
             self.dialogues[dia_id].append(utt_data)
 
-        # Convert to a list of (dialog_id, list_of_utterances)
+        
         self.dialogues = [(k, v) for k, v in self.dialogues.items()]
         
     def process_utterance(self, task):
@@ -91,46 +91,46 @@ class MELDConversationDataset(Dataset):
         """
         dia_id, utt_id, audio_file, row = task
 
-        # Load the waveform using torchaudio
+        
         waveform, sr = torchaudio.load(audio_file)
         
-        # If the audio is stereo (2 channels), convert it to mono
+        
         if waveform.size(0) > 1:
             waveform = waveform.mean(dim=0, keepdim=True)
             
-        # Apply audio transform if provided, otherwise use raw waveform
+        
         if self.audio_transform:
             audio_features = self.audio_transform(waveform, sr)
         else:
             audio_features = waveform
             
-        # Apply processor if provided
+        
         if self.audio_processor:
-            # Use the Hugging Face processor/feature extractor for preprocessing
+            
             inputs = self.audio_processor(
-                waveform.squeeze(0),  # Remove channel dimension
+                waveform.squeeze(0),  
                 sampling_rate=self.sampling_rate,
                 return_tensors="pt",
             )
             if "input_values" in inputs:
-                # For models like HuBERT, Wav2Vec2
+                
                 audio_features = inputs.input_values[0]
             elif "input_features" in inputs:
-                # For models like Whisper
+                
                 audio_features = inputs.input_features[0]
             else:
                 raise ValueError("Unsupported processor output format.")
         else:
-            # Use raw waveform if no processor or transform is provided
+            
             audio_features = waveform
 
-        # Process emotion and sentiment labels
+        
         emotion = row["Emotion"].lower()
         emotion_int = self.emotion_to_int(emotion)
         sentiment = row["Sentiment"].lower()
         sentiment_int = self.sentiment_to_int(sentiment)
 
-        # Update class counts
+        
         self.emotion_class_counts[emotion_int] += 1
         self.sentiment_class_counts[sentiment_int] += 1
 
@@ -185,7 +185,7 @@ class MELDConversationDataset(Dataset):
         """
         dialog_id, utterances = self.dialogues[idx]
 
-        # Prepare lists for audio features, transcripts, emotions, and sentiments
+        
         audio_list = []
         text_list = []
         emotion_list = []
@@ -206,9 +206,9 @@ class MELDConversationDataset(Dataset):
         }
         
 def meld_collate_fn(batch):
-    # batch is a list of conversation dicts (one per item in dataset)
-    # We can combine them into a single batch,
-    # but each conversation may have different # of utterances.
+    
+    
+    
 
     dialog_ids = []
     audio_lists = []
@@ -219,9 +219,9 @@ def meld_collate_fn(batch):
     for conv in batch:
         dialog_ids.append(conv["dialog_id"])
 
-        # Convert audio_list (list of numpy arrays) to tensors and pad
+        
         fbank_tensors = [torch.tensor(fbank) for fbank in conv["audio_list"]]
-        # Pad along the time dim (T)
+        
         fbank_padded = pad_sequence(fbank_tensors, batch_first=True)
         audio_lists.append(fbank_padded)
 
@@ -229,7 +229,7 @@ def meld_collate_fn(batch):
         emotion_lists.append(torch.tensor(conv["emotion_list"]))
         sentiment_lists.append(torch.tensor(conv["sentiment_list"]))
 
-    # Return them "as is", or do further padding if needed.
+    
     return {
         "dialog_ids": dialog_ids,
         "audio_lists": audio_lists,
@@ -250,7 +250,7 @@ class AudioTransformPipeline:
     def __call__(self, waveform, orig_sample_rate):
         audio = waveform
         
-        # Step 1: Resample if the original sample rate is different
+        
         if orig_sample_rate != self.target_sample_rate:
             resampler = T.Resample(
                 orig_freq=orig_sample_rate, new_freq=self.target_sample_rate)

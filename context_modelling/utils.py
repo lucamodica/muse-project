@@ -11,8 +11,8 @@ def compute_metrics(true_labels, predictions):
     """
     Compute classification metrics including accuracy, per-class F1 scores, and weighted average F1 score.
     """
-    # Compute overall accuracy
-    b_accuracy = round(balanced_accuracy_score(true_labels, predictions), 3)   # Compute F1 scores
+    
+    b_accuracy = round(balanced_accuracy_score(true_labels, predictions), 3)   
     report = classification_report(
         true_labels, predictions, output_dict=True, zero_division=0
     )
@@ -20,7 +20,7 @@ def compute_metrics(true_labels, predictions):
     per_class_f1 = {label: round(values["f1-score"], 3) for label, values in report.items() if label.isdigit()}
     weighted_f1 = round(report["weighted avg"]["f1-score"], 3)
 
-    # Compile metrics into a dictionary
+    
     metrics = {
         "balanced_acc": round(b_accuracy, 3),
         "weighted_f1": weighted_f1,
@@ -103,7 +103,7 @@ def analyze_results_per_class(true_labels, predicted_labels, class_names, task_n
     os.makedirs(save_path, exist_ok=True)
     
     if mode == "confusion_matrix":
-        # Plot confusion matrix
+        
         cm = confusion_matrix(true_labels, predicted_labels, labels=range(len(class_names)))
         plt.figure(figsize=(8, 6))
         sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=class_names, yticklabels=class_names)
@@ -117,7 +117,7 @@ def analyze_results_per_class(true_labels, predicted_labels, class_names, task_n
         plt.close()
 
     elif mode == "classification_report":
-        # Print classification report
+        
         report = classification_report(true_labels, predicted_labels, target_names=class_names, zero_division=0)
         open_path = os.path.join(save_path, "classification_report.txt")
         with open(open_path, 'w') as f:
@@ -125,7 +125,7 @@ def analyze_results_per_class(true_labels, predicted_labels, class_names, task_n
             f.write(report)
 
     elif mode == "roc_curve":
-        # Compute and plot ROC curves
+        
         true_binarized = label_binarize(true_labels, classes=range(len(class_names)))
         predicted_binarized = label_binarize(predicted_labels, classes=range(len(class_names)))
         plt.figure(figsize=(8, 6))
@@ -133,7 +133,7 @@ def analyze_results_per_class(true_labels, predicted_labels, class_names, task_n
             fpr, tpr, _ = roc_curve(true_binarized[:, i], predicted_binarized[:, i])
             roc_auc = auc(fpr, tpr)
             plt.plot(fpr, tpr, label=f"{class_name} (AUC = {roc_auc:.2f})")
-        plt.plot([0, 1], [0, 1], "k--")  # Random baseline
+        plt.plot([0, 1], [0, 1], "k--")  
         plt.title(f"ROC Curve for {task_name}")
         plt.xlabel("False Positive Rate")
         plt.ylabel("True Positive Rate")
@@ -154,39 +154,39 @@ def compute_emotion_class_weights(train_set, device, normalize=True):
     Returns:
         torch.Tensor: Tensor containing class weights on the specified device.
     """
-    # Gather all emotion labels in the train set
+    
     emotion_labels = [sample[2] for sample in train_set.samples]
 
-    # Count how many samples of each class
+    
     unique_classes, counts = np.unique(emotion_labels, return_counts=True)
     print("Class labels:", unique_classes)
     print("Class counts:", counts)
 
-    # Retrieve mapping dictionaries; assume str_to_int maps emotion string to an integer index
+    
     _, str_to_int = train_set.get_emotions_dicts()
 
     num_classes = len(str_to_int)
     ordered_counts = [0] * num_classes
 
-    # Map counts to the correct class index order
+    
     for class_label, count in zip(unique_classes, counts):
-        class_idx = str_to_int[class_label]   # e.g. 'neutral' → 0, 'joy' → 1, etc.
+        class_idx = str_to_int[class_label]   
         ordered_counts[class_idx] = count
 
     ordered_counts = np.array(ordered_counts)
     print("Ordered counts:", ordered_counts)
 
-    # Compute inverse frequency, avoiding division by zero
+    
     inverse_freq = 1.0 / np.maximum(ordered_counts, 1)
 
-    # Create a tensor of class weights
+    
     emotions_class_weights = torch.tensor(inverse_freq, dtype=torch.float32)
 
-    # Normalize the class weights if requested
+    
     if normalize:
         emotions_class_weights = emotions_class_weights / emotions_class_weights.sum()
 
-    # Move the tensor to the specified device
+    
     emotions_class_weights = emotions_class_weights.to(device)
 
     return emotions_class_weights

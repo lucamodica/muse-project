@@ -80,7 +80,7 @@ def train_one_epoch(args, model, dataloader, optimizers, criterions, emotion_reg
 
         
         optimizer.zero_grad()
-        batch_combined_loss = 0.0 # what is optimized
+        batch_combined_loss = 0.0
 
         for b_idx in range(len(batch["dialog_ids"])):
             fbank_list      = batch["fbank_lists"][b_idx]       
@@ -105,28 +105,22 @@ def train_one_epoch(args, model, dataloader, optimizers, criterions, emotion_reg
                 emotion_logits = emotion_logits.squeeze(0) 
                 sentiment_logits = sentiment_logits.squeeze(0)
 
-            # Unpad the logits
             emotion_logits = emotion_logits[:actual_len]
             sentiment_logits = sentiment_logits[:actual_len]
 
-            # Unpad the tensors
             emotion_tensor = emotion_tensor[:actual_len]
             sentiment_tensor = sentiment_tensor[:actual_len]
 
-            # Compute Loss
             e_loss = criterions['emotion'](emotion_logits, emotion_tensor)
             s_loss = criterions['sentiment'](sentiment_logits, sentiment_tensor)
 
-            # Add to batch losses
             batch_fused_emotion_loss += e_loss 
             batch_fused_sentiment_loss += s_loss
             batch_combined_loss += emotion_reg * e_loss + sentiment_reg * s_loss
 
-            # Predictions for non-padded time steps
             e_preds = torch.argmax(softmax(emotion_logits), dim=-1).detach().cpu().numpy()
             s_preds = torch.argmax(softmax(sentiment_logits), dim=-1).detach().cpu().numpy()
 
-            # Add to batch predictions
             batch_fused_emotion_preds.extend(e_preds)
             batch_fused_sentiment_preds.extend(s_preds)
 
@@ -136,8 +130,6 @@ def train_one_epoch(args, model, dataloader, optimizers, criterions, emotion_reg
         metrics['sentiment']['fused'].extend(batch_fused_sentiment_preds)
         metrics['emotion']['labels'].extend(batch_emotion_labels)
         metrics['sentiment']['labels'].extend(batch_sentiment_labels)
-        
-        # ------------------ FUSED BRANCH ------------------
 
         optimizer.zero_grad()
         batch_combined_loss.backward()
@@ -162,7 +154,6 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
     model.eval()
     softmax = nn.Softmax(dim=-1)
 
-    # Initialize loss and metrics structures similar to training
     losses = {'fused_emotion': 0.0, 'fused_sentiment': 0.0}
     metrics = {
         'emotion': {'fused': [], 'labels': []},
@@ -173,25 +164,21 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
 
     with torch.no_grad():
         for batch in loop:
-            # Initialize batch-specific accumulators
             batch_fused_emotion_loss = 0.0
             batch_fused_sentiment_loss = 0.0
 
             batch_fused_emotion_preds = []
             batch_fused_sentiment_preds = []
 
-            # Use local lists for labels; extend once per sample
             batch_emotion_labels = []
             batch_sentiment_labels = []
 
-            # Process each conversation in the batch
             for b_idx in range(len(batch["dialog_ids"])):
                 fbank_list      = batch["fbank_lists"][b_idx]
                 text_list       = batch["text_lists"][b_idx]
                 emotion_list    = batch["emotion_lists"][b_idx]
                 sentiment_list  = batch["sentiment_lists"][b_idx]
 
-                # Extend local label lists with current sample's labels
                 batch_emotion_labels.extend(emotion_list)
                 batch_sentiment_labels.extend(sentiment_list)
 
@@ -199,7 +186,6 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
 
                 audio_array = torch.as_tensor(fbank_list, dtype=torch.float, device=device).unsqueeze(1)
 
-                # Non-alternating branch
                 emotion_tensor = torch.as_tensor(emotion_list, dtype=torch.long, device=device)[:actual_len]
                 sentiment_tensor = torch.as_tensor(sentiment_list, dtype=torch.long, device=device)[:actual_len]
 
@@ -224,7 +210,6 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
                 batch_fused_emotion_preds.extend(e_preds)
                 batch_fused_sentiment_preds.extend(s_preds)
 
-            # End of inner loop over conversations
 
             losses['fused_emotion'] += (batch_fused_emotion_loss.item() / len(batch["dialog_ids"]))
             losses['fused_sentiment'] += (batch_fused_sentiment_loss.item() / len(batch["dialog_ids"]))
@@ -232,15 +217,12 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
             metrics['emotion']['fused'].extend(batch_fused_emotion_preds)
             metrics['sentiment']['fused'].extend(batch_fused_sentiment_preds)
 
-            # Extend global labels once per batch after processing all conversations
             metrics['emotion']['labels'].extend(batch_emotion_labels)
             metrics['sentiment']['labels'].extend(batch_sentiment_labels)
 
-    # Average the overall losses across the entire dataloader
     losses['fused_emotion'] /= len(dataloader)
     losses['fused_sentiment'] /= len(dataloader)
 
-    # Compute fused metrics
     fused_emotion_metrics = compute_metrics(metrics['emotion']['labels'], metrics['emotion']['fused'])
     fused_sentiment_metrics = compute_metrics(metrics['sentiment']['labels'], metrics['sentiment']['fused'])
     
@@ -318,7 +300,6 @@ def train_and_validate(args, model, train_loader, val_loader, optimizers, criter
         print("\t- Best sentiment weighted acc:", best_sentiment_weighted_acc)
         print("\n---------------------------------------------------------------\n\n")
 
-        #load best model
         model.load_state_dict(best_model_state)
 
     return model, results
@@ -410,7 +391,7 @@ def main():
 
     print("\n")
 
-    #get weights for balancing classes
+    
 
     class_counts = train_set.emotion_class_counts
     total_samples = 0
@@ -423,10 +404,10 @@ def main():
     for i in range(len(class_counts)):
         class_weights[i] = class_counts[i] / total_samples
 
-    #invert the weights
+    
     class_weights = 1 / class_weights
 
-    #normalize the weights
+    
     class_weights = class_weights / class_weights.sum()
 
     class_weights = class_weights.to(device)
@@ -443,7 +424,6 @@ def main():
 
     num_epochs = args.epochs
 
-    #set max utterance size to be the max of all train dev and test sets
     max_utt = max(train_set.max_utterance_size, dev_set.max_utterance_size, test_set.max_utterance_size)
 
     print("Max utterance size:", max_utt)

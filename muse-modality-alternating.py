@@ -52,7 +52,6 @@ def get_arguments():
     return parser.parse_args()
 
 def initialize_losses_and_metrics(args):
-    # tracked measures
     losses = {}
     metrics = {}
     if args.emotion_task:
@@ -139,7 +138,7 @@ def train_one_epoch(args, epoch, model, dataloader, optimizers, criterions,
         elif args.use_text:
             t = model.text_encoder(texts)
 
-        # ---------------------------- AUDIO MODALITY TRAINING ----------------------------
+        
 
         if args.use_audio:
 
@@ -175,7 +174,7 @@ def train_one_epoch(args, epoch, model, dataloader, optimizers, criterions,
                 losses['audio_sentiment'] += s_audio_loss.item()
                 metrics['sentiment']['audio'].extend(audio_s_pred)
 
-        # ---------------------------- TEXT MODALITY TRAINING ----------------------------
+        
 
         if args.use_text:
 
@@ -213,7 +212,7 @@ def train_one_epoch(args, epoch, model, dataloader, optimizers, criterions,
                 losses['text_sentiment'] += s_text_loss.item()
                 metrics['sentiment']['text'].extend(text_s_pred)
 
-        # ---------------------------- MODALITY FUSION ----------------------------
+        
 
         if args.use_audio and args.use_text:
             if args.emotion_task:
@@ -234,14 +233,13 @@ def train_one_epoch(args, epoch, model, dataloader, optimizers, criterions,
                 combined_loss = emotion_reg * e_loss + sentiment_reg * s_loss
                 losses['fused_combined'] += combined_loss.item()
 
-        # ---------------------------- END ----------------------------
+        
 
         if args.emotion_task:
             metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
         if args.sentiment_task:
             metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
     
-    # Average losses
     for key in losses.keys():
         losses[key] /= len(dataloader)
 
@@ -293,7 +291,7 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
         elif args.use_text:
             t = model.text_encoder(texts)
 
-        # ---------------------------- AUDIO MODALITY VALIDATION ----------------------------
+        
 
         if args.use_audio:
 
@@ -318,7 +316,7 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
                 losses['audio_sentiment'] += s_audio_loss.item()
                 metrics['sentiment']['audio'].extend(audio_s_pred)
 
-        # ---------------------------- TEXT MODALITY VALIDATION ----------------------------
+        
 
         if args.use_text:
 
@@ -343,7 +341,7 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
                 losses['text_sentiment'] += s_text_loss.item()
                 metrics['sentiment']['text'].extend(text_s_pred)
 
-        # ---------------------------- MODALITY FUSION ----------------------------
+        
 
         if args.use_audio and args.use_text:
             if args.emotion_task:
@@ -364,14 +362,13 @@ def validate_one_epoch(args, model, dataloader, criterions, emotion_reg=0.5, sen
                 combined_loss = emotion_reg * e_loss + sentiment_reg * s_loss
                 losses['fused_combined'] += combined_loss.item()
 
-        # ---------------------------- END ----------------------------
+        
 
         if args.emotion_task:
             metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
         if args.sentiment_task:
             metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
 
-    # Average losses
     for key in losses.keys():
         losses[key] /= len(dataloader)
 
@@ -521,7 +518,7 @@ def test_inference(args, model, test_loader, criterions, experiment_name, device
             elif args.use_text:
                 t = model.text_encoder(texts)
 
-        # ---------------------------- AUDIO MODALITY VALIDATION ----------------------------
+        
 
             if args.use_audio:
 
@@ -537,7 +534,7 @@ def test_inference(args, model, test_loader, criterions, experiment_name, device
                     s_criterion=criterions['sentiment']
                 )
 
-        # ---------------------------- TEXT MODALITY VALIDATION ----------------------------
+        
 
             if args.use_text:
 
@@ -553,7 +550,7 @@ def test_inference(args, model, test_loader, criterions, experiment_name, device
                     s_criterion=criterions['sentiment']
                 )
 
-        # ---------------------------- MODALITY FUSION ----------------------------
+        
 
             if args.use_audio and args.use_text:
                 if args.emotion_task:
@@ -604,8 +601,6 @@ def main():
     audio_model_name = "facebook/wav2vec2-base"
     text_model_name = "roberta-base"
 
-    #get weights for balancing classes
-
     class_counts = train_set.emotion_class_counts
     total_samples = 0
     for key in class_counts:
@@ -617,10 +612,8 @@ def main():
     for i in range(len(class_counts)):
         emotion_class_weights[i] = class_counts[i] / total_samples
 
-    #invert the weights
     emotion_class_weights = 1 / emotion_class_weights
 
-    #normalize the weights
     emotion_class_weights = emotion_class_weights / emotion_class_weights.sum()
 
     emotion_class_weights = emotion_class_weights.to(device)
@@ -642,8 +635,6 @@ def main():
         fusion_dim=768,
         alternating=True,
         text_fine_tune=True,
-        #audio_fine_tune=True,
-        #unfreeze_last_n_audio=2,
         unfreeze_last_n_text=1,
         audio_encoder=resnet18(modality='audio'),
         num_emotions=num_emotions,

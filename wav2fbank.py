@@ -6,11 +6,11 @@ from os.path import join as join
 import numpy as np
 
 def wav2fbank(filename, filename2=None, mix_lambda=-1):
-        # no mixup
+        
         if filename2 == None:
             waveform, sr = torchaudio.load(filename)
             waveform = waveform - waveform.mean()
-        # mixup
+        
         else:
             waveform1, sr = torchaudio.load(filename)
             waveform2, _ = torchaudio.load(filename2)
@@ -20,12 +20,12 @@ def wav2fbank(filename, filename2=None, mix_lambda=-1):
 
             if waveform1.shape[1] != waveform2.shape[1]:
                 if waveform1.shape[1] > waveform2.shape[1]:
-                    # padding
+                    
                     temp_wav = torch.zeros(1, waveform1.shape[1])
                     temp_wav[0, 0:waveform2.shape[1]] = waveform2
                     waveform2 = temp_wav
                 else:
-                    # cutting
+                    
                     waveform2 = waveform2[0, 0:waveform1.shape[1]]
 
             mix_waveform = mix_lambda * waveform1 + (1 - mix_lambda) * waveform2
@@ -44,7 +44,7 @@ def wav2fbank(filename, filename2=None, mix_lambda=-1):
 
         p = target_length - n_frames
 
-        # cut and pad
+        
         if p > 0:
             m = torch.nn.ZeroPad2d((0, 0, 0, p))
             fbank = m(fbank)

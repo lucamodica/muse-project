@@ -22,26 +22,26 @@ def process_task(model, epoch, a, t, classifier, weight_size, labels, criterion,
 
     fused = torch.cat([a, t], dim=-1)
 
-    # --- Compute logits ---
+    
     logits_fused = classifier(fused)
 
-    # 2) Audio-only
+    
     logits_a = (
         torch.mm(a, torch.transpose(classifier.weight[:, :weight_size // 2], 0, 1))
         + classifier.bias / 2
     )
 
-    # 3) Text-only
+    
     logits_t = (
         torch.mm(t, torch.transpose(classifier.weight[:, weight_size // 2:], 0, 1))
         + classifier.bias / 2
     )
 
-    # --- Compute loss ---
+    
     loss = criterion(logits_fused, labels)
 
 
-    # --- Predictions ---
+    
     preds_fused = torch.argmax(softmax(logits_fused), dim=1).detach().cpu().numpy()
     preds_audio = torch.argmax(softmax(logits_a),      dim=1).detach().cpu().numpy()
     preds_text  = torch.argmax(softmax(logits_t),      dim=1).detach().cpu().numpy()
@@ -52,16 +52,13 @@ def train_one_epoch(model, epoch, dataloader, optimizer, criterions,
                     emotion_reg=0.6, sentiment_reg=0.4, device='cuda'):
     model.train()
 
-    # tracked measures
     losses = {'emotion': 0.0, 'sentiment': 0.0}
     metrics = {'emotion': {'fused': [], 'audio': [], 'text': [], 'labels': []},
                'sentiment': {'fused': [], 'audio': [], 'text': [], 'labels': []}}
 
-    # Wrap dataloader with tqdm
     loop = tqdm(dataloader, desc="Training", leave=False)
     
     for audio_arrays, texts, emotion_labels, sentiment_labels in loop:
-        # Move data to device
         audio_arrays = audio_arrays.to(device)
         emotion_labels = emotion_labels.to(device)
         sentiment_labels = sentiment_labels.to(device)
@@ -69,10 +66,9 @@ def train_one_epoch(model, epoch, dataloader, optimizer, criterions,
         optimizer.zero_grad()
 
 
-        # Forward pass for audio and text
         a, t = model(audio_arrays, texts)
 
-        # EMOTION TASK
+        
         emotion_loss, e_fused, e_audio, e_text = process_task(
             model=model, 
             epoch=epoch,
@@ -90,7 +86,7 @@ def train_one_epoch(model, epoch, dataloader, optimizer, criterions,
         metrics['emotion']['text'].extend(e_text)
         metrics['emotion']['labels'].extend(emotion_labels.cpu().numpy())
 
-        # SENTIMENT TASK
+        
         sentiment_loss, s_fused, s_audio, s_text = process_task(
             model=model, 
             epoch=epoch,
@@ -108,16 +104,13 @@ def train_one_epoch(model, epoch, dataloader, optimizer, criterions,
         metrics['sentiment']['text'].extend(s_text)
         metrics['sentiment']['labels'].extend(sentiment_labels.cpu().numpy())
 
-        # Backprop on weighted loss
         combined_loss = emotion_reg * emotion_loss + sentiment_reg * sentiment_loss
         combined_loss.backward()
         optimizer.step()
     
-    # Average losses
     losses['emotion'] /= len(dataloader)
     losses['sentiment'] /= len(dataloader)
 
-    # compute metrics per modality 
     emotion_metrics = {
         'fused': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['fused']),
         'audio': compute_metrics(metrics['emotion']['labels'], metrics['emotion']['audio']),
@@ -139,7 +132,6 @@ def validate_one_epoch(model, epoch, dataloader, criterions, emotion_reg=0.6, se
                'sentiment': {'fused': [], 'audio': [], 'text': [], 'labels': []}}
 
     with torch.no_grad():
-        # Also wrap validation dataloader with tqdm
         loop = tqdm(dataloader, desc="Validation", leave=False)
         
         for audio_arrays, texts, emotion_labels, sentiment_labels in loop:
@@ -297,7 +289,7 @@ def test_inference(model, test_loader, criterions, experiment_name, device='cuda
 
             a, t = model(audio_arrays, texts)
 
-            # ------------------- EMOTION TASK -------------------
+            
             _, e_fused, _, _ = process_task(
                 model=model, epoch=0, a=a, t=t, classifier=model.emotion_classifier,
                 weight_size=model.emotion_classifier.weight.size(1),
@@ -306,7 +298,7 @@ def test_inference(model, test_loader, criterions, experiment_name, device='cuda
             true_and_pred_labels['emotion']['true'].extend(emotion_labels.cpu().numpy())
             true_and_pred_labels['emotion']['pred'].extend(e_fused)
 
-            # ------------------ SENTIMENT TASK ------------------
+            
             _, s_fused, _, _ = process_task(
                 model=model, epoch=0, a=a, t=t, classifier=model.sentiment_classifier,
                 weight_size=model.sentiment_classifier.weight.size(1),
@@ -315,7 +307,6 @@ def test_inference(model, test_loader, criterions, experiment_name, device='cuda
             true_and_pred_labels['sentiment']['true'].extend(sentiment_labels.cpu().numpy())
             true_and_pred_labels['sentiment']['pred'].extend(s_fused)
 
-    # save all the results as pkl file
     results_path = os.path.join(
         'test_inference_results', 
         f"{experiment_name}_test_inference_results.pkl"
@@ -349,8 +340,6 @@ def main():
     audio_model_name = "facebook/wav2vec2-base"
     text_model_name = "roberta-base"
 
-    #get weights for balancing classes
-
     class_counts = train_set.emotion_class_counts
     total_samples = 0
     for key in class_counts:
@@ -362,10 +351,8 @@ def main():
     for i in range(len(class_counts)):
         emotion_class_weights[i] = class_counts[i] / total_samples
 
-    #invert the weights
     emotion_class_weights = 1 / emotion_class_weights
 
-    #normalize the weights
     emotion_class_weights = emotion_class_weights / emotion_class_weights.sum()
 
     emotion_class_weights = emotion_class_weights.to(device)
@@ -394,7 +381,6 @@ def main():
         
     ).to(device)
 
-    #optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.99, weight_decay=0.0001)
     experiment_name = 'joint_training_SGD_mom_099_wd_0001_lr_0001_epochs_40_roberta_resnet18'
 

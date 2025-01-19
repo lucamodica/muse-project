@@ -55,7 +55,7 @@ class MELDDataset(Dataset):
     def __getitem__(self, idx):
         npy_path, transcript, emotion, sentiment = self.samples[idx]
 
-        # Load the resampled audio from .npy
+        
         audio_array = np.load(npy_path)
 
         if self.transform:

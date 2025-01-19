@@ -19,14 +19,14 @@ class MELDConversationDataset(Dataset):
         """
         df = pd.read_csv(f'{root_dir}/{csv_file}')
 
-        #order the df rows according to dialogueID and each dialogue according to utteranceID
+        
         df = df.sort_values(by=['Dialogue_ID', 'Utterance_ID'])
 
         self.emotion_class_counts = {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0}
         self.sentiment_class_counts = {0: 0, 1: 0, 2: 0}
         self.max_utterance_size = 0
         
-        self.dialogues = {}  # key: dialogue_id, value: list of utterance dicts
+        self.dialogues = {}  
         prev_dia_id = None
         utt_count = 0
 
@@ -68,9 +68,9 @@ class MELDConversationDataset(Dataset):
             prev_dia_id = dia_id
 
         
-        # Convert to list of (dialog_id, list_of_utterances)
+        
         self.dialogues = [(k, sorted(v, key=lambda x: x["fbank_path"])) for k, v in self.dialogues.items()]
-        # The sorting step ensures the utterances are in ascending order of utt_id if needed.
+        
 
     def emotion_to_int(self, str):
         str_to_int = {"neutral": 0, "joy": 1, "surprise": 2, "anger": 3, "sadness": 4, "fear": 5, "disgust": 6}
@@ -94,19 +94,19 @@ class MELDConversationDataset(Dataset):
     def __getitem__(self, idx):
         dialog_id, utterances = self.dialogues[idx]
         
-        # For each utterance, load filterbanks, transcript, emotion, sentiment
+        
         fbank_list = []
         text_list = []
         emotion_list = []
         sentiment_list = []
         
         for utt in utterances:
-            fbank = np.load(utt["fbank_path"])          # shape e.g. (T, fbank_dim)
+            fbank = np.load(utt["fbank_path"])          
             fbank_list.append(fbank)
             
             text_list.append(utt["transcript"])
-            emotion_list.append(utt["emotion"])         # or mapped to int
-            sentiment_list.append(utt["sentiment"])     # or mapped to int
+            emotion_list.append(utt["emotion"])         
+            sentiment_list.append(utt["sentiment"])     
         
         return {
             "dialog_id": dialog_id,
@@ -119,9 +119,9 @@ class MELDConversationDataset(Dataset):
 
 
 def meld_collate_fn(batch):
-    # batch is a list of conversation dicts (one per item in dataset)
-    # We can combine them into a single batch, 
-    # but each conversation may have different # of utterances.
+    
+    
+    
     
     dialog_ids = []
     fbank_lists = []
@@ -132,16 +132,16 @@ def meld_collate_fn(batch):
     for conv in batch:
         dialog_ids.append(conv["dialog_id"])
         
-        # Convert fbank_list (list of numpy arrays) to tensors and pad
+        
         fbank_tensors = [torch.tensor(fbank) for fbank in conv["fbank_list"]]
-        fbank_padded = pad_sequence(fbank_tensors, batch_first=True)  # Pad along the time dim (T)
+        fbank_padded = pad_sequence(fbank_tensors, batch_first=True)  
         fbank_lists.append(fbank_padded)
         
         text_lists.append(conv["text_list"])
         emotion_lists.append(torch.tensor(conv["emotion_list"]))
         sentiment_lists.append(torch.tensor(conv["sentiment_list"]))
     
-    # Return them "as is", or do further padding if needed.
+    
     return {
         "dialog_ids": dialog_ids,
         "fbank_lists": fbank_lists,

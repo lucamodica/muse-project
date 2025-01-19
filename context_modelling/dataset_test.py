@@ -17,7 +17,7 @@ class AudioTransformPipeline:
         self.n_mels = n_mels
 
     def __call__(self, waveform, orig_sample_rate):
-        # Step 1: Resample if the original sample rate is different
+        
         if orig_sample_rate != self.target_sample_rate:
             resampler = T.Resample(
                 orig_freq=orig_sample_rate,
@@ -41,9 +41,9 @@ def meld_collate_fn(batch):
     for conv in batch:
         dialog_ids.append(conv["dialog_id"])
 
-        # Convert audio_list (list of waveforms/features) to tensors and pad
+        
         fbank_tensors = [torch.tensor(fbank) for fbank in conv["audio_list"]]
-        # Pad along the time dim
+        
         fbank_padded = pad_sequence(fbank_tensors, batch_first=True)
         audio_lists.append(fbank_padded)
 
@@ -97,20 +97,20 @@ class MELDConversationDataset(Dataset):
         self.sampling_rate = sampling_rate
         self.target_length = target_length
 
-        # Read and sort the CSV
+        
         df = pd.read_csv(os.path.join(root_dir, csv_file))
         df = df.sort_values(by=['Dialogue_ID', 'Utterance_ID'])
 
-        # Class counts for emotions and sentiments
+        
         self.emotion_class_counts = {i: 0 for i in range(7)}
         self.sentiment_class_counts = {i: 0 for i in range(3)}
         self.max_utterance_size = 0
 
-        # Dictionary to hold dialogues:
-        #   key: dialogue_id, value: list of utterance dicts
+        
+        
         self.dialogues = {}
 
-        # Build tasks for parallel processing
+        
         tasks = []
         prev_dia_id = None
         utt_count = 0
@@ -119,7 +119,7 @@ class MELDConversationDataset(Dataset):
             dia_id = row["Dialogue_ID"]
             utt_id = row["Utterance_ID"]
 
-            # Update max dialogue size
+            
             if prev_dia_id == dia_id:
                 utt_count += 1
             else:
@@ -131,18 +131,18 @@ class MELDConversationDataset(Dataset):
             tasks.append((dia_id, utt_id, audio_file, row))
             prev_dia_id = dia_id
 
-        # Use ThreadPoolExecutor for parallel utterance processing
+        
         max_workers = min(max_workers, len(tasks)) if tasks else 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             results = list(executor.map(self._process_utterance, tasks))
 
-        # Organize processed data into dialogues
+        
         for dia_id, utt_data in results:
             if dia_id not in self.dialogues:
                 self.dialogues[dia_id] = []
             self.dialogues[dia_id].append(utt_data)
 
-        # Convert to a list of (dialog_id, list_of_utterances) for indexing
+        
         self.dialogues = [(k, v) for k, v in self.dialogues.items()]
 
     def _process_utterance(self, task):
@@ -155,19 +155,19 @@ class MELDConversationDataset(Dataset):
         """
         dia_id, utt_id, audio_file, row = task
 
-        # Load waveform
+        
         waveform, sr = torchaudio.load(audio_file)
 
-        # Convert stereo to mono if needed
+        
         if waveform.size(0) == 2:
             waveform = waveform.mean(dim=0, keepdim=True)
 
-        # Apply custom audio transform if provided
+        
         if self.audio_transform:
             waveform = self.audio_transform(waveform, sr)
 
-        # Apply HF audio_processor if provided
-        audio_features = waveform  # fallback to raw if none
+        
+        audio_features = waveform  
         if self.audio_processor:
             inputs = self.audio_processor(
                 waveform.squeeze(0),
@@ -175,19 +175,19 @@ class MELDConversationDataset(Dataset):
                 return_tensors="pt"
             )
             if "input_values" in inputs:
-                # e.g. for Wav2Vec2, HuBERT
+                
                 audio_features = inputs.input_values[0]
             elif "input_features" in inputs:
-                # e.g. for Whisper
+                
                 audio_features = inputs.input_features[0]
             else:
                 raise ValueError("Unsupported processor output format.")
 
-        # Map emotion/sentiment to integers
+        
         emotion_int = self.emotion_to_int(row["Emotion"].lower())
         sentiment_int = self.sentiment_to_int(row["Sentiment"].lower())
 
-        # Update class counts
+        
         self.emotion_class_counts[emotion_int] += 1
         self.sentiment_class_counts[sentiment_int] += 1
 
